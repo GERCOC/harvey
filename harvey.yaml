@@ -84,6 +84,31 @@ channels:
     enabled: false             # explicit opt-in; credentials alone do not enable it
     max_daily_connections: 20
     max_daily_messages: 10
+  # Telegram, WhatsApp and VK (docs/messengers.md). Off until you turn it on.
+  # First messages are drafted for businesses whose own site links a messenger
+  # (confirm MESSENGER_TELEGRAM / MESSENGER_WHATSAPP / MESSENGER_VK), and you
+  # send each one from your own app: Harvey never sends a cold message itself.
+  # Conversations people start with your bot, VK community or WhatsApp
+  # Business number are answered like email replies.
+  messengers:
+    enabled: false
+    cold_drafts: true
+    channel_order: ["telegram", "whatsapp", "vk"]
+    max_daily_drafts: 20
+    max_daily_manual_sends: 30   # first messages the dashboard opens in a day
+    followup_days: 3             # one follow-up after this many days; 0 = none
+    skip_if_emailed: true
+    # opt_out_line: added under every first message; it must ask for a reply
+    # Harvey recognises as an opt-out. Default and rules: docs/messengers.md.
+    require_approval: true       # bot answers wait for you; false = autopilot
+    telegram:
+      enabled: false             # TELEGRAM_BOT_TOKEN in .env (from @BotFather)
+      # welcome: sent once when someone presses Start; "" sends nothing.
+    vk:
+      enabled: false             # VK_GROUP_TOKEN in .env (community token, messages access)
+    whatsapp:
+      enabled: false             # WHATSAPP_TOKEN, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN in .env
+      phone_number_id: ""        # from Meta's WhatsApp > API Setup page
 
 usage:
   max_daily_claude_percent: 80

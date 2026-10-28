@@ -384,6 +384,49 @@ SIGNAL_CATALOG: list[dict] = [
         "cost_note": "free (site HTML)",
         "confidence_floor": 0.0,
     },
+    # ── Messengers the business publishes on its own site ──
+    {
+        "code": "MESSENGER_TELEGRAM",
+        "label": "Telegram contact",
+        "description": (
+            "A Telegram account the site links to (t.me/name, or a t.me/+phone "
+            "link), one observation per account. Bots and invite links don't "
+            "count. Harvey drafts a first message for it in Messengers, and you "
+            "send it from your own Telegram."
+        ),
+        "category": "verification",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (site HTML)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "MESSENGER_WHATSAPP",
+        "label": "WhatsApp contact",
+        "description": (
+            "A WhatsApp number the site links to (a wa.me or api.whatsapp.com "
+            "button), or a WhatsApp Business short link. A phone number with no "
+            "WhatsApp link never counts: nothing says it has WhatsApp."
+        ),
+        "category": "verification",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (site HTML)",
+        "confidence_floor": 0.0,
+    },
+    {
+        "code": "MESSENGER_VK",
+        "label": "VK page",
+        "description": (
+            "The business's VK page or community, from a vk.com or vk.me link on "
+            "its site. Share buttons and posts don't count."
+        ),
+        "category": "verification",
+        "value_type": "text",
+        "collector": "profile",
+        "cost_note": "free (site HTML)",
+        "confidence_floor": 0.0,
+    },
 ]
 
 

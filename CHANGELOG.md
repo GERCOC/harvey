@@ -9,6 +9,20 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Messengers: Telegram, WhatsApp and VK** (`channels.messengers`, off by
+  default; docs/messengers.md). Three new signals (`MESSENGER_TELEGRAM`,
+  `MESSENGER_WHATSAPP`, `MESSENGER_VK`) record the accounts a business links
+  from its own site. For those businesses Harvey drafts a short first message
+  and one follow-up, in Russian, into a new **Messengers** tab, where you open
+  each chat in your own app and send it yourself: Harvey never sends a cold
+  message from a personal account. Conversations people start with a Telegram
+  bot, a VK community or a WhatsApp Business number (Meta Cloud API, with a
+  signed webhook: `harvey messengers whatsapp-webhook`) are read, answered by
+  draft through the same approval-or-autopilot choice as email, and stopped at
+  once on an opt-out ("нет", "не пишите", "стоп"). Threats and complaints go
+  to you. A daily cap, the deterministic message checks, the do-not-contact
+  list and `harvey sending pause` all apply. `harvey messengers` shows the
+  queue; `harvey messengers test` checks the tokens.
 - **Scavio discovery providers** (`scavio_maps`, `scavio_search`). Google Maps
   listings around each city, with phone, website, category, rating and review
   count, and Google organic results with rank, both from one

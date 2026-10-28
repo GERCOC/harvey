@@ -289,9 +289,102 @@ class LinkedInChannelConfig(BaseModel):
     max_daily_messages: int = 10
 
 
+DEFAULT_MESSENGER_OPT_OUT_LINE = "Если неактуально, напишите «нет», и я больше не побеспокою."
+# What a messenger reply must say for Harvey to stop on its own; the opt-out
+# line has to ask for one of them.
+MESSENGER_OPT_OUT_WORDS = ("нет", "стоп", "не пишите", "отписаться", "stop")
+
+
+class TelegramBotConfig(BaseModel):
+    """A Telegram bot (token from @BotFather in TELEGRAM_BOT_TOKEN). A bot can
+    only answer people who wrote to it first: that's the point."""
+    enabled: bool = False
+    # Sent once, by itself, when someone presses Start. "" sends nothing.
+    welcome: str = "Здравствуйте! Напишите ваш вопрос, отвечу здесь."
+
+
+class VkGroupConfig(BaseModel):
+    """A VK community's messages (community token in VK_GROUP_TOKEN, with
+    messages access). VK lets a community write only to people who wrote to
+    it or allowed its messages."""
+    enabled: bool = False
+    api_version: str = "5.199"
+
+
+class WhatsAppCloudConfig(BaseModel):
+    """WhatsApp Business through Meta's Cloud API (WHATSAPP_TOKEN,
+    WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN). Incoming messages arrive at
+    `harvey messengers whatsapp-webhook`, which must be reachable over HTTPS."""
+    enabled: bool = False
+    phone_number_id: str = ""
+    api_version: str = "v21.0"
+
+
+class MessengersConfig(BaseModel):
+    """Telegram, WhatsApp and VK (docs/messengers.md).
+
+    First messages are drafted for the businesses whose sites link a
+    messenger, and wait in the dashboard for you to send from your own app:
+    Harvey never sends a cold message itself. Conversations people start with
+    your bot, community or WhatsApp Business number are answered through
+    the same approval queue as email."""
+    enabled: bool = False
+    # Drafting first messages to businesses that publish a messenger contact.
+    cold_drafts: bool = True
+    # The order a business's messengers are tried in when it has several.
+    channel_order: list[str] = ["telegram", "whatsapp", "vk"]
+    max_daily_drafts: int = 20
+    # How many first messages the dashboard offers to open in a day: one
+    # account writing to many strangers is what gets it limited.
+    max_daily_manual_sends: int = 30
+    # A second, shorter message this many days after the first, if they
+    # haven't answered (you mark answers yourself; Harvey can't see your
+    # personal chats). 0 sends none.
+    followup_days: int = 3
+    # Leave out businesses Harvey has already emailed.
+    skip_if_emailed: bool = True
+    max_chars: int = 600
+    # Added under every first message and follow-up; never to replies.
+    opt_out_line: str = DEFAULT_MESSENGER_OPT_OUT_LINE
+    # Bot conversations: true holds every answer for you; false sends them
+    # (an answer with a link that isn't yours still waits).
+    require_approval: bool = True
+    telegram: TelegramBotConfig = TelegramBotConfig()
+    vk: VkGroupConfig = VkGroupConfig()
+    whatsapp: WhatsAppCloudConfig = WhatsAppCloudConfig()
+
+    @field_validator("channel_order")
+    @classmethod
+    def _known_channels(cls, v: list[str]) -> list[str]:
+        out = []
+        for ch in v or []:
+            ch = str(ch).strip().lower()
+            if ch not in ("telegram", "whatsapp", "vk"):
+                raise ValueError(f"{ch!r} is not a messenger: use telegram, whatsapp or vk")
+            if ch not in out:
+                out.append(ch)
+        return out
+
+    @field_validator("opt_out_line")
+    @classmethod
+    def _messenger_opt_out(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            return v
+        lowered = v.lower()
+        if any(bit in lowered for bit in ("http", "www.", "@")):
+            raise ValueError("opt_out_line can't contain a link or an address.")
+        if not any(w in lowered for w in MESSENGER_OPT_OUT_WORDS):
+            raise ValueError(
+                "opt_out_line must ask for a reply Harvey recognises as an opt-out: "
+                + ", ".join(f"«{w}»" for w in MESSENGER_OPT_OUT_WORDS) + ".")
+        return v
+
+
 class ChannelsConfig(BaseModel):
     email: EmailChannelConfig = EmailChannelConfig()
     linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
+    messengers: MessengersConfig = MessengersConfig()
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")
@@ -640,6 +733,12 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    # Messengers (channels.messengers)
+    telegram_bot_token: str = ""
+    vk_group_token: str = ""
+    whatsapp_token: str = ""
+    whatsapp_app_secret: str = ""
+    whatsapp_verify_token: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -755,6 +854,11 @@ def load_env() -> EnvConfig:
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        vk_group_token=os.getenv("VK_GROUP_TOKEN", "").strip(),
+        whatsapp_token=os.getenv("WHATSAPP_TOKEN", "").strip(),
+        whatsapp_app_secret=os.getenv("WHATSAPP_APP_SECRET", "").strip(),
+        whatsapp_verify_token=os.getenv("WHATSAPP_VERIFY_TOKEN", "").strip(),
     )
     return env
 

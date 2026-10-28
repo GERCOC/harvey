@@ -290,6 +290,13 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     sender = Sender(brain, state, config, env)
     handler = Handler(brain, state, config, env)
     analyst = Analyst(state)
+    messengers = None
+    if config.channels.messengers.enabled:
+        from harvey.messengers.agent import MessengerAgent
+        from harvey.messengers.bots import missing_keys
+        messengers = MessengerAgent(brain, state, config, env)
+        for problem in missing_keys(config, env):
+            logger.warning(f"Messengers: {problem}")
 
     interval = config.usage.heartbeat_interval_minutes * 60
     max_calls = max(int(200 * (config.usage.max_daily_claude_percent / 100)), 1)
@@ -418,6 +425,12 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             # turns a name and a domain into something worth writing about.
             if summary.get("unprofiled", 0):
                 tasks.append(("profile", run_profile_stage(state, limit=25, config=config)))
+
+            # Messengers ride along too, outside quiet hours: read the bot,
+            # community and WhatsApp chats, draft answers, send approved ones,
+            # and draft first messages for you to send yourself.
+            if messengers is not None and not send_only:
+                tasks.append(("messengers", messengers.run()))
 
             outcomes = await _run_agents(tasks)
 

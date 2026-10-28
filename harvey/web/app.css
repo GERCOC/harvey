@@ -1032,3 +1032,8 @@ table.clip td { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .warmup-actions { margin-top: var(--sp-2); align-items: center; }
 a.btn, a.btn:hover { text-decoration: none; }
 .warmup-actions .form-input { flex: 1 1 200px; height: 28px; min-width: 0; }
+
+/* Messengers: several quiet buttons sit together on the right. */
+#messengers .convo-actions .btn-ghost { margin-left: 0; }
+#messengers .convo-actions .push { margin-left: auto; }
+#messengers .thread-draft .form-input { margin: 4px 0 0; }

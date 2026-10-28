@@ -47,6 +47,7 @@ confirmed signals, searching contacts, and the same screen in dark mode:
 - [How the data is stored](#how-the-data-is-stored)
 - [Configuration](#configuration)
 - [Using a ChatGPT plan instead (Codex)](#using-a-chatgpt-plan-instead-codex)
+- [Messengers: Telegram, WhatsApp, VK](#messengers-telegram-whatsapp-vk)
 - [Legal and deliverability](#legal-and-deliverability)
 - [Troubleshooting](#troubleshooting)
 - [Project structure](#project-structure)
@@ -201,11 +202,11 @@ you need the Codex provider.
 
 This is the part that makes Harvey different from a black box, and it is deliberately not skippable.
 
-Harvey knows how to collect **29 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
+Harvey knows how to collect **32 signals** about a business. It does not collect any of them until you say so. On first run it *proposes* the catalog; you confirm, skip, or reject each one in the dashboard or from the terminal:
 
 ```bash
 harvey signals                       # review the catalog
-harvey signals --confirm free        # everything that costs nothing (26 of them)
+harvey signals --confirm free        # everything that costs nothing (29 of them)
 harvey signals --confirm SERP_RANK   # a paid one, opted into explicitly
 ```
 
@@ -228,6 +229,7 @@ Every signal shows what it is in plain language, **what it costs**, and how many
 | | `YC_BACKED`, `ACCELERATOR`, `FUNDING_ROUND` | A startup, as its own site says: YC or another accelerator (with the batch or cohort), or a raise it announced (round, amount, date). |
 | **People** | `CONTACT_FOUND`, `DECISION_MAKER_TITLE`, `LIKELY_OWNER`, `REGISTRY_VERIFIED` | Who decides, and whether they own the place. |
 | **Contact** | `EMAIL_PATTERN`, `EMAIL_STATUS`, `CONTACT_FORM_URL` | Whether you can actually reach them. |
+| | `MESSENGER_TELEGRAM`, `MESSENGER_WHATSAPP`, `MESSENGER_VK` | The Telegram, WhatsApp or VK account the business links from its own site. See [Messengers](#messengers-telegram-whatsapp-vk). |
 
 ### Then a cohort is a query, not a list
 
@@ -661,6 +663,33 @@ What to know:
 
 ---
 
+## Messengers: Telegram, WhatsApp, VK
+
+Off by default (`channels.messengers.enabled`). Built for markets where
+business happens in messengers rather than email; messages are written in
+Russian. Full guide: [docs/messengers.md](docs/messengers.md).
+
+- **Contacts.** Confirm `MESSENGER_TELEGRAM`, `MESSENGER_WHATSAPP` and
+  `MESSENGER_VK`, and profiling records the accounts a business links from its
+  own site (t.me, wa.me, vk.com links). A bare phone number never counts as a
+  WhatsApp account.
+- **First messages, sent by you.** Harvey drafts one short message (and one
+  follow-up) per business into the dashboard's **Messengers** tab. *Open* copies
+  it and opens the chat in your own app; you press send, then *Sent*. Harvey
+  never sends a cold message itself: automating a personal account breaks
+  Telegram's, WhatsApp's and VK's rules, and one account writing to many
+  strangers gets restricted. A daily cap (`max_daily_manual_sends`) and the
+  same deterministic checks as email apply before a chat opens.
+- **Conversations people start.** A Telegram bot, a VK community or a WhatsApp
+  Business number (Meta Cloud API): Harvey reads what people write, honours
+  opt-outs and hands complaints to you by fixed rules, drafts the rest, and
+  sends what you approve (or everything, with `require_approval: false`, still
+  holding a link that isn't yours). WhatsApp free text only goes within 24
+  hours of their last message. `harvey messengers test` checks the tokens;
+  `harvey messengers whatsapp-webhook` receives WhatsApp messages behind HTTPS.
+- **Answers in your own account.** When someone replies to a message you sent
+  by hand, paste their answer in and Harvey drafts what to say back for you to copy.
+
 ## Legal and deliverability
 
 Harvey automates outreach, but **you are the sender.** Cold email is legal in most places when done right and expensive when done wrong — CAN-SPAM penalties run to $53,088 per email. Harvey ships with compliant defaults. Keep them.
@@ -756,7 +785,7 @@ harvey/
 ├── claude_runtime.py    # Isolated Claude CLI calls (safe mode, no tools, clean dir)
 ├── codex.py             # Isolated Codex subscription runtime
 ├── state.py             # SQLite schema, migrations, observations, cohorts
-├── signals.py           # the 23-signal catalog Harvey proposes
+├── signals.py           # the signal catalog Harvey proposes
 ├── pipeline.py          # DISCOVER → PROFILE chaining
 ├── gate.py              # deterministic pre-send checks
 ├── dashboard.py         # FastAPI JSON API
@@ -765,6 +794,7 @@ harvey/
 │   ├── discover.py      # provider adapters, junk filtering, entity resolution
 │   └── profile.py       # the free HTTP profiler
 ├── agents/              # scout, writer, sender, handler, analyst
+├── messengers/          # Telegram, WhatsApp, VK: contacts, drafts, bots
 ├── integrations/        # mail providers, email finder, quota
 └── web/                 # dashboard HTML/CSS/JS — no build step
 

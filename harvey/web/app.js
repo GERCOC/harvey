@@ -414,6 +414,7 @@ function loadCurrentTab() {
     case 'campaigns': loadCampaigns(); break;
     case 'outbox': loadOutbox(); break;
     case 'conversations': loadConversations(); break;
+    case 'messengers': loadMessengers(); break;
     case 'activity': loadActivity(); break;
     case 'usage': loadUsage(); break;
     case 'settings': loadSettings(); loadSendingModeCard(); break;
@@ -2599,7 +2600,7 @@ setInterval(async () => {
 }, 20000);
 
 // Data tabs: auto-refresh live views without clobbering anything in progress.
-// Outbox, settings and help are deliberately excluded — re-rendering the desk
+// Outbox, messengers, settings and help are deliberately excluded — re-rendering the desk
 // under someone mid-decision loses their place, and settings may be mid-edit.
 setInterval(() => {
   if (document.hidden || _locked) return;

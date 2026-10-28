@@ -519,6 +519,85 @@ MIGRATIONS: list[str] = [
     -- knows about the recipient. Empty until then.
     ALTER TABLE prospects ADD COLUMN timezone TEXT DEFAULT '';
     """,
+    # ── v15: messengers (harvey/messengers) ──
+    """
+    -- First messages to businesses that publish a messenger contact. Harvey
+    -- never sends these: a person opens each one in their own app and marks
+    -- it sent. Status ladder:
+    --   waiting (a follow-up whose first message hasn't gone)
+    --   -> scheduled (first message sent; due at send_at)
+    --   -> pending_review (ready for you) -> sent
+    --   (or skipped / cancelled)
+    -- The unique index is the double-draft guard: one first message and one
+    -- follow-up per business, whatever channel it went to.
+    CREATE TABLE IF NOT EXISTS messenger_outbox (
+        id TEXT PRIMARY KEY,
+        company_id TEXT DEFAULT '',
+        channel TEXT DEFAULT '',
+        handle TEXT DEFAULT '',
+        step INTEGER DEFAULT 1,
+        body TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending_review',
+        send_at TIMESTAMP,
+        sent_at TIMESTAMP,
+        error TEXT DEFAULT '',
+        thread_id TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_messenger_outbox_company_step
+        ON messenger_outbox(company_id, step) WHERE company_id != '';
+    CREATE INDEX IF NOT EXISTS idx_messenger_outbox_status
+        ON messenger_outbox(status, send_at);
+
+    -- One conversation per chat. transport 'bot' is a bot, community or
+    -- WhatsApp Business number Harvey reads and writes through; 'manual' is
+    -- your own account, where you paste their answer in and copy Harvey's
+    -- draft out.
+    CREATE TABLE IF NOT EXISTS messenger_threads (
+        id TEXT PRIMARY KEY,
+        channel TEXT DEFAULT '',
+        transport TEXT DEFAULT 'bot',
+        chat_id TEXT DEFAULT '',
+        handle TEXT DEFAULT '',
+        display_name TEXT DEFAULT '',
+        company_id TEXT DEFAULT '',
+        status TEXT DEFAULT 'open',
+        intent TEXT DEFAULT '',
+        stage TEXT DEFAULT 'initial_outreach',
+        status_reason TEXT DEFAULT '',
+        last_inbound_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_messenger_threads_chat
+        ON messenger_threads(channel, transport, chat_id) WHERE chat_id != '';
+
+    -- Every message in a thread, both ways. Outgoing ones climb the same
+    -- ladder as email: pending_review -> approved -> sent (or held /
+    -- rejected / failed / cancelled). An incoming one is 'received' until
+    -- the agent has handled it, then 'handled'.
+    CREATE TABLE IF NOT EXISTS messenger_messages (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        body TEXT DEFAULT '',
+        status TEXT DEFAULT '',
+        provider_msg_id TEXT DEFAULT '',
+        approved_by TEXT DEFAULT '',
+        error TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sent_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_messenger_messages_provider
+        ON messenger_messages(thread_id, direction, provider_msg_id)
+        WHERE provider_msg_id != '';
+    CREATE INDEX IF NOT EXISTS idx_messenger_messages_thread
+        ON messenger_messages(thread_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_messenger_messages_status
+        ON messenger_messages(direction, status);
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")

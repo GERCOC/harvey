@@ -23,6 +23,7 @@ from harvey.public_http import public_http_client
 from harvey.startups import funding_text
 
 from harvey.collectors.ats import detect_board, matching_roles, read_board, role_keywords
+from harvey.messengers.contacts import SIGNAL_FOR, find_contacts
 
 from harvey.collectors.discover import (
     name_from_domain, name_matches_domain, site_name_from_html,
@@ -126,6 +127,12 @@ _CAREERS_ANCHOR = re.compile(r"^(careers?|jobs|join us|join (our|the) team|we['â
 MAX_BOARD_ROLES = 5
 CONTACT_PATHS = ("/contact", "/contact-us", "/get-a-quote", "/free-estimate",
                  "/request-estimate", "/quote")
+# A site linking more accounts than this is listing staff or branches; the
+# first few are the business's own.
+MAX_MESSENGER_HANDLES = 3
+# Where a site lists its messengers when the homepage doesn't: the contact
+# page, under its English or Russian name.
+MESSENGER_PATHS = ("/contacts", "/contact", "/kontakty", "/kontakti", "/contact-us")
 
 # Words that are never part of a person's name. Without this, headings like
 # "Request Service", "Baker History" and "Commercial Services" pass a
@@ -1233,6 +1240,20 @@ class ProfileCollector:
                 curl, chtml = await self._first_present(site, CONTACT_PATHS)
                 if chtml and re.search(r"(?is)<form\b", _strip_code(chtml)):
                     add("CONTACT_FORM_URL", text=curl, url=curl)
+
+        # messengers the business publishes: what a message in Telegram,
+        # WhatsApp or VK goes to (harvey.messengers). Links only: a bare
+        # phone number never counts as a messenger account.
+        wanted = [ch for ch, code in SIGNAL_FOR.items() if self.wants(code)]
+        if wanted:
+            where, found = site, find_contacts(home)
+            if not any(found.get(ch) for ch in wanted):
+                curl, chtml = await self._first_present(site, MESSENGER_PATHS)
+                if chtml:
+                    where, found = curl, find_contacts(chtml)
+            for ch in wanted:
+                for handle in found.get(ch, [])[:MAX_MESSENGER_HANDLES]:
+                    add(SIGNAL_FOR[ch], text=handle, url=where)
 
         # open roles â†’ hiring intent. The job-board feed when their site
         # links one (titles, departments and dates for every role), else

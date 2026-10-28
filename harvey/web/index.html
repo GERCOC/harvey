@@ -22,6 +22,7 @@
     <symbol id="i-campaigns" viewBox="0 0 24 24"><path d="M21 3 10 14"/><path d="M21 3 14.5 21l-4.5-7-7-4.5z"/></symbol>
     <symbol id="i-outbox" viewBox="0 0 24 24"><path d="M3 13h5l1.5 3h5l1.5-3h5"/><path d="M5.5 5h13L21 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z"/></symbol>
     <symbol id="i-conversations" viewBox="0 0 24 24"><path d="M20 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="i-messengers" viewBox="0 0 24 24"><path d="M21 3 3 10.5l7 2.5 2.5 7z"/><path d="m10 13 4.5-4.5"/></symbol>
     <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
     <symbol id="i-usage" viewBox="0 0 24 24"><path d="M5 20v-8M12 20V5M19 20v-5"/></symbol>
     <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
@@ -73,6 +74,7 @@
       <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
+      <button onclick="showTab('messengers', this)"><svg class="icon" aria-hidden="true"><use href="#i-messengers"/></svg><span class="label">Messengers</span><span class="nav-count" id="nav-messengers"></span></button>
     </div>
     <div class="nav-group">
       <div class="nav-label">Pipeline</div>
@@ -267,6 +269,12 @@
 <div id="conversations" class="section">
   <div class="section-head"><div><h2>Conversations</h2><p>Every reply, and how Harvey handled it.</p></div></div>
   <div id="conversations-list"></div>
+</div>
+
+<!-- Messengers -->
+<div id="messengers" class="section">
+  <div class="section-head"><div><h2>Мессенджеры</h2><p>Telegram, WhatsApp и ВКонтакте: первые сообщения, которые вы отправляете сами, и диалоги, которые ведёт Harvey.</p></div></div>
+  <div id="messengers-body"></div>
 </div>
 
 <!-- Activity -->
@@ -561,5 +569,6 @@
 </div>
 
 <script src="/static/app.js"></script>
+<script src="/static/messengers.js"></script>
 </body>
 </html>

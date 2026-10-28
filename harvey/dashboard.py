@@ -54,6 +54,10 @@ app = FastAPI(title="Harvey Dashboard", docs_url=None, redoc_url=None, openapi_u
 token_store = auth.TokenStore(TOKEN_FILE)
 app.add_middleware(auth.DashboardGuard, store=token_store)
 
+# The Messengers tab (Telegram, VK, WhatsApp): its own module, behind the same guard.
+from harvey.messengers.routes import router as _messengers_router  # noqa: E402
+app.include_router(_messengers_router)
+
 # Harvey process tracking
 _harvey_process: subprocess.Popen | None = None
 _harvey_started_at: datetime | None = None

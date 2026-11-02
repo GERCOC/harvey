@@ -181,8 +181,9 @@ def parse_inbound_chat(text: str, own_body: str) -> list[str]:
     for ln in lines:
         if len(ln) < 2 or _is_ui_noise(ln):
             continue
+        folded = ln.casefold()
         for mark in _OWN_MARKS:
-            if ln.startswith(mark):
+            if folded.startswith(mark.casefold()):
                 ln = ln[len(mark):].strip()   # another of our own bubbles
         if len(ln) < 2 or _is_ui_noise(ln):
             continue

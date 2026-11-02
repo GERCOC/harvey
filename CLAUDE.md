@@ -68,7 +68,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 
 Then install the browser for LinkedIn prospecting:
 ```bash
-python -m playwright install chromium
+python -m patchright install chromium
 ```
 
 ### Step 2: API Keys (`.env`)

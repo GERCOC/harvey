@@ -14,11 +14,12 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from harvey.config import operator_timezone
 from harvey.messengers import gate
 from harvey.messengers.bots import NO_TEXT, WhatsAppCloud, configured_bots
 from harvey.messengers.contacts import CHANNEL_LABELS, SIGNAL_FOR
 from harvey.messengers.personal import PERSONAL_CHANNELS, PersonalClient, REACHABLE, UNKNOWN
-from harvey.messengers.store import MessengerStore, _now
+from harvey.messengers.store import COLD_OPEN, MessengerStore, _now
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
 logger = logging.getLogger("harvey.messengers")
@@ -73,7 +74,8 @@ class MessengerAgent:
         except Exception as e:
             logger.warning(f"Personal {channel}: the browser didn't start: {type(e).__name__}")
             return None
-        client = PersonalClient(channel, session, pcfg, pacing=self.send_pacing)
+        client = PersonalClient(channel, session, pcfg, pacing=self.send_pacing,
+                                tz_name=operator_timezone(self.config))
         self.personal_clients[channel] = client
         return client
 
@@ -89,7 +91,8 @@ class MessengerAgent:
                            ("sent", self.send_approved), ("released", self.store.release_due),
                            ("drafted", self.draft_first_messages),
                            ("checked", self.check_personal_availability),
-                           ("personal_sent", self.send_approved_personal)):
+                           ("personal_sent", self.send_approved_personal),
+                           ("personal_replies", self.read_personal_replies)):
             try:
                 report[name] = await step()
             except Exception as e:
@@ -174,8 +177,13 @@ class MessengerAgent:
         await self.store.set_thread(thread["id"], status=status, status_reason=reason,
                                     **({"intent": intent} if intent else {}))
         await self.store.cancel_outbound(thread["id"])
-        if status in ("opted_out", "closed") and thread.get("company_id"):
-            await self.store.cancel_cold_for(thread["company_id"])
+        if status in ("opted_out", "closed"):
+            if thread.get("company_id"):
+                await self.store.cancel_cold_for(thread["company_id"])
+            # Also by handle: an approved personal send can exist before any
+            # thread links it to the business, and a "no" must beat that queue.
+            if thread.get("handle"):
+                await self.store.cancel_cold_for_handle(thread["channel"], thread["handle"])
         await self.store.mark_inbound_handled(thread["id"])
         await self.state.log_action(f"messenger_{status}", "messengers",
                                     {"thread": thread["id"], "channel": thread["channel"],
@@ -506,9 +514,11 @@ class MessengerAgent:
                 continue   # no login for this channel; other channels carry on
             result = await client.send_first_message(item["handle"], item["body"])
             if not result["ok"]:
-                await self.store._run(
-                    "UPDATE messenger_outbox SET error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (result["error"][:500], item["id"]))
+                # Count the try: after a few failures the draft leaves the
+                # queue, so an unconfirmed send is never retried forever
+                # (the first attempt may have gone through after all).
+                await self.store.personal_send_failed(
+                    item["id"], result["error"], max_attempts=pcfg.max_send_attempts)
                 continue
             thread = await self.store.thread_for(
                 item["channel"], "manual", f"{item['channel']}:{item['handle']}",
@@ -523,6 +533,38 @@ class MessengerAgent:
                 await self.state.log_action("messenger_personal_sent", "messengers",
                                             {"item": item["id"], "channel": item["channel"]})
         return sent
+
+    async def read_personal_replies(self) -> int:
+        """Read what they answered in chats Harvey itself opened from your
+        account. The replies land in the same threads as bot messages, so
+        ``answer_threads`` sees an opt-out and stops the sequence before
+        anything else is drafted for that business."""
+        pcfg = self.cfg.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return 0
+        stored = 0
+        rows = await self.store._rows(
+            """SELECT m.id AS item_id, m.channel, m.handle, m.thread_id, c.body
+               FROM messenger_outbox m JOIN messenger_messages c ON c.thread_id = m.thread_id
+               WHERE m.step = 1 AND m.status = 'sent' AND m.channel IN ('telegram','whatsapp')
+                 AND c.direction = 'out'
+               ORDER BY c.created_at DESC LIMIT 20""")
+        seen: set[str] = set()
+        for row in rows:
+            key = f"{row['channel']}:{row['handle']}"
+            if key in seen or not row["thread_id"]:
+                continue
+            seen.add(key)
+            client = await self._personal_client(row["channel"])
+            if client is None:
+                continue   # no login for this channel; other channels carry on
+            own = await self.store._rows(
+                """SELECT body FROM messenger_messages WHERE thread_id = ? AND direction = 'out'
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""", (row["thread_id"],))
+            for text in await client.read_reply(row["handle"], own[0]["body"] if own else ""):
+                if await self.store.add_inbound(row["thread_id"], text):
+                    stored += 1
+        return stored
 
 
 class BrainPaused(Exception):

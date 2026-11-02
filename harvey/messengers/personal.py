@@ -101,6 +101,33 @@ def parse_whatsapp_page(text: str) -> str:
     return UNKNOWN
 
 
+def parse_inbound_whatsapp(text: str, own_body: str) -> list[str]:
+    """Bubbles after our own last message in a WhatsApp Web chat, oldest
+    first. A DOM guess, not an API: anything that fails to parse yields no
+    messages rather than invented ones."""
+    body = text or ""
+    if own_body:
+        idx = body.rfind(own_body)
+        if idx >= 0:
+            body = body[idx + len(own_body):]
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    skip_first = bool(lines and any(ch.isdigit() for ch in lines[0])
+                      and len(lines[0]) <= 6)   # a lone time stamp like "12:05"
+    out = []
+    for ln in lines[1:] if (skip_first and lines) else lines:
+        if len(ln) < 2 or ln.isdigit():
+            continue
+        if ln.lower() in ("whatsapp", "type a message", "send", "voice message"):
+            continue
+        out.append(ln)
+    return out[:5]
+
+
+def parse_inbound_telegram(text: str, own_body: str) -> list[str]:
+    """Same idea for Telegram Web; see parse_inbound_whatsapp."""
+    return parse_inbound_whatsapp(text, own_body)
+
+
 def chat_url(channel: str, handle: str) -> str:
     """The web-client URL that opens (or proves the absence of) a chat.
 
@@ -254,11 +281,12 @@ class PersonalClient:
     in production, a fake in tests); nothing here touches Playwright types.
     """
 
-    def __init__(self, channel: str, session, cfg, pacing: bool = True):
+    def __init__(self, channel: str, session, cfg, pacing: bool = True, tz_name: str = ""):
         self.channel = channel
         self.session = session
         self.cfg = cfg
         self.pacing = pacing
+        self.tz_name = tz_name   # the operator's zone; empty means UTC
         self.blocked_reason = ""   # set when the service pushes us away
 
     @property
@@ -267,7 +295,11 @@ class PersonalClient:
 
     def _within_hours(self) -> bool:
         start, end = self.cfg.active_hours
-        now_hm = _now().strftime("%H:%M")
+        if self.tz_name:
+            import pytz
+            now_hm = datetime.now(pytz.timezone(self.tz_name)).strftime("%H:%M")
+        else:
+            now_hm = _now().strftime("%H:%M")
         if start <= end:
             return start <= now_hm < end
         return now_hm >= start or now_hm < end   # a window crossing midnight
@@ -336,6 +368,27 @@ class PersonalClient:
         if not sent:
             return {"ok": False, "error": "the message didn't go: the chat or the input wasn't there"}
         return {"ok": True, "error": ""}
+
+    async def read_reply(self, chat_ref: str, own_body: str) -> list[str]:
+        """What they wrote back after our last sent message, oldest first.
+
+        Heuristic DOM reading of the open chat — never raises; an empty
+        list means "nothing new" and costs one page visit."""
+        if self.blocked_reason:
+            return []
+        url = chat_url(self.channel, chat_ref)
+        if not url:
+            return []
+        try:
+            _, text = await self.session.read_chat(url, timeout_ms=8_000)
+        except Exception as e:
+            logger.warning(f"Personal {self.channel}: reply read failed: {type(e).__name__}")
+            return []
+        await self._sleep_between_actions()
+        if self._looks_blocked(text):
+            return []
+        parse = parse_inbound_telegram if self.channel == "telegram" else parse_inbound_whatsapp
+        return parse(text, own_body)
 
 
 class MessengerLoginError(Exception):

@@ -626,6 +626,12 @@ MIGRATIONS: list[str] = [
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """,
+    # ── v17: capped retries for personal sends (harvey/messengers/agent.py) ──
+    """
+    -- Failed browser sends move back to pending_review with a counter;
+    -- without a cap every heartbeat would reopen the browser forever.
+    ALTER TABLE messenger_outbox ADD COLUMN send_attempts INTEGER DEFAULT 0;
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")

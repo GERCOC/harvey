@@ -335,6 +335,10 @@ class PersonalMessengerConfig(BaseModel):
     max_sends_per_day: int = 5
     # Random pause between two browser actions, seconds.
     action_gap_seconds: tuple[float, float] = (20.0, 90.0)
+    # An unconfirmed send is retried at most this many times in total: the
+    # page may have accepted the message even though the script didn't see
+    # it, and blind retries are how people get messaged twice.
+    max_send_attempts: int = 3
 
     @field_validator("active_hours")
     @classmethod

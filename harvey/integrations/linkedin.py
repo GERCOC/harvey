@@ -124,7 +124,7 @@ class LinkedInAutomation:
 
     async def start(self):
         """Launch browser and set up context."""
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
 
         self._pw = await async_playwright().start()
         self.browser = await self._pw.chromium.launch(headless=True)

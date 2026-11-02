@@ -11,8 +11,9 @@ import aiosqlite
 
 from harvey.messengers.contacts import CHANNEL_FOR, SIGNAL_FOR
 
-# First-message statuses that still lead somewhere.
-COLD_OPEN = ("waiting", "scheduled", "pending_review")
+# First-message statuses that still lead somewhere. "approved" counts: you
+# can say no again (skip, replied, opt-out) until it has actually gone out.
+COLD_OPEN = ("waiting", "scheduled", "pending_review", "approved")
 # A thread in one of these gets nothing more from Harvey.
 THREAD_STOPPED = ("opted_out", "closed")
 
@@ -191,7 +192,9 @@ class MessengerStore:
         return True
 
     async def skip_cold(self, item_id: str) -> bool:
-        """Not sending it. Skipping a first message drops its follow-up too."""
+        """Not sending it — even after you approved a personal send: an
+        approval is revocable until the message has actually gone out.
+        Skipping a first message drops its follow-up too."""
         item = await self.get_cold(item_id)
         if not item or item["status"] not in COLD_OPEN:
             return False
@@ -211,6 +214,18 @@ class MessengerStore:
             f"""UPDATE messenger_outbox SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
                 WHERE company_id = ? AND status IN ({ph})""",
             (company_id, *COLD_OPEN))
+
+    async def cancel_cold_for_handle(self, channel: str, handle: str) -> int:
+        """Every still-queued first message to this exact contact, stopped —
+        including one already approved for a personal send. A reply that
+        says no must beat the queue even before a thread links them."""
+        if not handle:
+            return 0
+        ph = ",".join("?" for _ in COLD_OPEN)
+        return await self._run(
+            f"""UPDATE messenger_outbox SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                WHERE channel = ? AND lower(handle) = lower(?) AND status IN ({ph})""",
+            (channel, handle, *COLD_OPEN))
 
     async def release_due(self) -> int:
         """Follow-ups whose day has come move to the queue."""
@@ -286,6 +301,30 @@ class MessengerStore:
             await db.commit()
         return True
 
+    async def personal_send_failed(self, item_id: str, error: str, max_attempts: int = 3) -> None:
+        """A browser send didn't confirm. Count the try; after too many the
+        draft leaves the queue for good — retrying blindly risks sending a
+        message twice when the first attempt actually went through."""
+        await self._run(
+            """UPDATE messenger_outbox SET error = ?, send_attempts = send_attempts + 1,
+                      status = CASE WHEN send_attempts + 1 >= ? THEN 'cancelled' ELSE 'approved' END,
+                      updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status = 'approved'""",
+            (error[:500], int(max_attempts), item_id))
+
+    async def cancel_approved_personal(self, item_id: str) -> bool:
+        """You changed your mind before it went out: an approved-but-unsent
+        first message drops its follow-up too, like skip_cold does."""
+        item = await self.get_cold(item_id)
+        if not item or item["status"] != "approved" or item["step"] != 1:
+            return False
+        await self._run(
+            """UPDATE messenger_outbox SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (item_id,))
+        await self.cancel_cold_for(item["company_id"])
+        return True
+
     # ── Personal logins (the browser profile lives on disk; here only its state) ──
 
     async def personal_accounts(self) -> dict[str, dict]:
@@ -295,12 +334,17 @@ class MessengerStore:
     async def set_personal_account(self, channel: str, **fields) -> None:
         allowed = {"transport", "display_name", "session_path", "status", "last_error", "qr_at"}
         fields = {k: v for k, v in fields.items() if k in allowed}
-        sets = ", ".join(f"{k} = ?" for k in fields)
+        cols = list(fields.keys())
+        placeholders = ", ".join(["?"] * len(cols))
+        col_list = ", ".join(cols)
+        update_clause = ", ".join(f"{k}=excluded.{k}" for k in cols)
         vals = tuple(fields.values())
-        if sets:
+
+        if cols:
             await self._run(
-                f"""INSERT INTO messenger_personal_accounts (channel, {sets}) VALUES (?, {vals})
-                    ON CONFLICT(channel) DO UPDATE SET {", ".join(f"{k}=excluded.{k}" for k in fields)},
+                f"""INSERT INTO messenger_personal_accounts (channel, {col_list}) 
+                    VALUES (?, {placeholders})
+                    ON CONFLICT(channel) DO UPDATE SET {update_clause},
                     updated_at = CURRENT_TIMESTAMP""",
                 (channel, *vals))
         else:

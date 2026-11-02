@@ -101,6 +101,18 @@ channels:
     # opt_out_line: added under every first message; it must ask for a reply
     # Harvey recognises as an opt-out. Default and rules: docs/messengers.md.
     require_approval: true       # bot answers wait for you; false = autopilot
+    # Personal-account sending (docs/messengers.md). The platforms forbid
+    # automation of personal accounts: your number can be limited or banned.
+    # Off until BOTH flags below say yes, and even then Harvey sends only a
+    # message you approved on the dashboard, one per business, inside limits.
+    personal:
+      enabled: false
+      confirm_risk: false        # written agreement that the ban risk is yours
+      active_hours: ["09:00", "18:00"]   # in usage.quiet_hours.timezone, not UTC
+      max_checks_per_day: 25     # availability looks from your account
+      max_sends_per_day: 5       # approved first messages sent through the browser
+      action_gap_seconds: [20.0, 90.0]   # random pause between browser actions
+      max_send_attempts: 3       # after this an unconfirmed send leaves the queue
     telegram:
       enabled: false             # TELEGRAM_BOT_TOKEN in .env (from @BotFather)
       # welcome: sent once when someone presses Start; "" sends nothing.

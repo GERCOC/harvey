@@ -1,2 +1,18 @@
+# Python build / bytecode artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+
+# Runtime state (browser profiles, login QR codes, local DBs) — never commit
+data/
+*.db
+*.sqlite3
+.env

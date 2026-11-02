@@ -34,11 +34,8 @@ def make_config(personal=None, do_not_contact=()) -> HarveyConfig:
     # below runs at an arbitrary clock time, so the window opens all day.
     on = {"enabled": True, "confirm_risk": True, "active_hours": ["00:00", "23:59"],
           "action_gap_seconds": [0.0, 0.0]}
-    # personal=None means "the personal path is off"; a dict tweaks the on-config
-    if personal is None:
-        personal = {"enabled": False, "confirm_risk": False}
-    else:
-        personal = {**on, **personal}
+    # no argument means "the personal path is on"; {"enabled": False} turns it off
+    personal = {**on, **(personal or {})}
     data["channels"]["messengers"] = {"enabled": True, "personal": personal}
     data["compliance"]["do_not_contact"] = list(do_not_contact)
     data["persona"]["email"] = "anna@bookwell.example"

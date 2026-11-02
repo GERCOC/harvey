@@ -12,6 +12,7 @@
 
 import asyncio
 import logging
+import zoneinfo
 from datetime import datetime, timedelta, timezone
 
 from harvey.config import operator_timezone
@@ -502,6 +503,13 @@ class MessengerAgent:
                 continue   # unverified: it waits for you to send it yourself
             if await self.store.personal_sent_since(_utc_midnight()) >= pcfg.max_sends_per_day:
                 break
+            thread = await self.store._rows(
+                """SELECT status FROM messenger_threads t
+                   JOIN messenger_outbox m ON m.thread_id = t.id WHERE m.id = ?""",
+                (item["id"],))
+            if thread and thread[0]["status"] == "opted_out":
+                await self.store.skip_cold(item["id"])
+                continue
             domain = item["company_domain"] or item["handle"].partition("@")[2]
             issues = gate.problems(item["body"], self.config, kind="cold", company_domain=domain)
             if issues:
@@ -514,7 +522,7 @@ class MessengerAgent:
                 continue   # no login for this channel; other channels carry on
             result = await client.send_first_message(item["handle"], item["body"])
             if not result["ok"]:
-                # Count the try: after a few failures the draft leaves the
+                # Count the try; after a few failures the draft leaves the
                 # queue, so an unconfirmed send is never retried forever
                 # (the first attempt may have gone through after all).
                 await self.store.personal_send_failed(
@@ -542,13 +550,21 @@ class MessengerAgent:
         pcfg = self.cfg.personal
         if not (pcfg.enabled and pcfg.confirm_risk):
             return 0
+        paused = await self.state.get_setting("sending_paused")
+        if paused:
+            return 0   # the kill switch stops the browser too
+        if not self._personal_within_hours(pcfg):
+            return 0   # reading opens pages like checking does: your hours only
+        room = pcfg.max_checks_per_day - await self.store.checked_since(_utc_midnight())
+        if room <= 0:
+            return 0   # the day's browser budget is spent on checks
         stored = 0
         rows = await self.store._rows(
             """SELECT m.id AS item_id, m.channel, m.handle, m.thread_id, c.body
                FROM messenger_outbox m JOIN messenger_messages c ON c.thread_id = m.thread_id
                WHERE m.step = 1 AND m.status = 'sent' AND m.channel IN ('telegram','whatsapp')
                  AND c.direction = 'out'
-               ORDER BY c.created_at DESC LIMIT 20""")
+               ORDER BY c.created_at DESC LIMIT ?""", (min(room, 20),))
         seen: set[str] = set()
         for row in rows:
             key = f"{row['channel']}:{row['handle']}"
@@ -562,9 +578,26 @@ class MessengerAgent:
                 """SELECT body FROM messenger_messages WHERE thread_id = ? AND direction = 'out'
                    ORDER BY created_at DESC, rowid DESC LIMIT 1""", (row["thread_id"],))
             for text in await client.read_reply(row["handle"], own[0]["body"] if own else ""):
+                # No provider id here, so the stamp alone can't stop a repeat:
+                # the same text already sitting unread would be re-answered
+                # every cycle, spending the model's budget on one message.
+                dup = await self.store._rows(
+                    """SELECT 1 FROM messenger_messages WHERE thread_id = ? AND direction = 'in'
+                       AND body = ? AND status = 'received' LIMIT 1""",
+                    (row["thread_id"], text))
+                if dup:
+                    continue
                 if await self.store.add_inbound(row["thread_id"], text):
                     stored += 1
         return stored
+
+    @staticmethod
+    def _personal_within_hours(pcfg) -> bool:
+        start, end = pcfg.active_hours
+        now_hm = datetime.now(zoneinfo.ZoneInfo(operator_timezone())).strftime("%H:%M")
+        if start <= end:
+            return start <= now_hm < end
+        return now_hm >= start or now_hm < end   # a window crossing midnight
 
 
 class BrainPaused(Exception):

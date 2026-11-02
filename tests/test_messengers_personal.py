@@ -298,3 +298,106 @@ async def test_a_gate_problem_blocks_the_send_and_records_why(state):
 def rows_of(state, sql):
     with closing(sqlite3.connect(state.db_path)) as db:
         return [r[0] for r in db.execute(sql)]
+
+
+# ── Reading replies out of a personal chat (agent + parser) ──
+
+WA_PAGE = """WhatsApp
+Ольга Иванова
+Да, давайте созвонимся завтра
+Кофейня Пример
+Иван Петров
+в сети
+Здравствуйте! Вопрос?
+12:05
+А сколько стоит?
+12:07
+Введите сообщение"""
+
+TG_PAGE = """Telegram
+Ольга Иванова
+Привет!
+Иван Петров
+online
+Здравствуйте!
+Вопрос?
+А сколько стоит?
+Сообщение"""
+
+
+def test_parse_inbound_keeps_only_this_chat_after_our_own_message():
+    # The page carries the whole sidebar; only bubbles below our own last
+    # message count — other people's names and previews must never leak in.
+    assert parse_inbound_whatsapp(WA_PAGE, "Здравствуйте! Вопрос?") == ["А сколько стоит?"]
+    # Our draft is rendered with different line breaks than we stored it.
+    assert parse_inbound_telegram(TG_PAGE, "Здравствуйте! Вопрос?") == ["А сколько стоит?"]
+
+
+def test_parse_inbound_without_our_message_reads_nothing_invented():
+    assert parse_inbound_whatsapp("", "Что-то") == []
+    # No own message on the page: the chat body isn't delimited, so nothing
+    # is claimed as a reply rather than guessing across the sidebar.
+    assert parse_inbound_whatsapp("Ольга Иванова\nПривет!", "Здравствуйте! Вопрос?") == []
+
+
+@pytest.mark.asyncio
+async def test_personal_replies_store_once_and_stop_after_a_no(state):
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    s = FakeSession(send_ok=True)
+    s.text = WA_PAGE
+    a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)})
+    assert await a.send_approved_personal() == 1
+    thread_id = (await store.get_cold(oid))["thread_id"]
+    s.text = WA_PAGE.replace("А сколько стоит?", "Нет, спасибо")
+    assert await a.read_personal_replies() == 1
+    assert await a.read_personal_replies() == 0   # the same text is not new twice
+    msgs = await store._rows("""SELECT body FROM messenger_messages
+                                WHERE thread_id = ? AND direction = 'in'""", (thread_id,))
+    assert [m["body"] for m in msgs] == ["Нет, спасибо"]
+
+
+@pytest.mark.asyncio
+async def test_personal_reply_read_respects_the_kill_switch(state):
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    s = FakeSession(send_ok=True, url="https://web.telegram.org/a/im?chats=peer-1", text=WA_PAGE)
+    a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)})
+    assert await a.send_approved_personal() == 1
+    reads_after_send = len(s.reads)
+    await state.set_setting("sending_paused", "paused by hand")
+    assert await a.read_personal_replies() == 0
+    assert len(s.reads) == reads_after_send   # no new page visits while paused
+
+
+@pytest.mark.asyncio
+async def test_an_opt_out_after_approval_beats_the_queue(state):
+    # You approved the send; then they said no. The next pass must not type
+    # anything into the browser: the opt-out cancels the approved draft.
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    thread = await store.thread_for("telegram", "manual", "telegram:@ivan",
+                                    handle="@ivan", company_id=cid)
+    await store.add_inbound(thread["id"], "нет, не пишите")
+    s = FakeSession(send_ok=True)
+    a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)},
+                    config=make_config())
+    a.brain = SimpleNamespace(load_prompt=lambda *a, **k: "", load_skill=lambda n: "",
+                              think_json=None, paused_reason="")
+    await a.answer_threads()   # fixed rule sees the "no" before any model call
+    assert (await store.get_cold(oid))["status"] == "cancelled"
+    assert await a.send_approved_personal() == 0
+    assert s.sends == []
+
+
+@pytest.mark.asyncio
+async def test_give_up_after_the_last_attempt_cancels_the_followup(state):
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    await store.personal_send_failed(oid, "the chat wasn't there", max_attempts=1)
+    assert (await store.get_cold(oid))["status"] == "cancelled"
+    assert rows_of(state, "SELECT status FROM messenger_outbox WHERE step = 2") == ["cancelled"]

@@ -21,6 +21,7 @@ check returns "unknown" and nothing else happens.
 import asyncio
 import logging
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -101,31 +102,81 @@ def parse_whatsapp_page(text: str) -> str:
     return UNKNOWN
 
 
-def parse_inbound_whatsapp(text: str, own_body: str) -> list[str]:
-    """Bubbles after our own last message in a WhatsApp Web chat, oldest
-    first. A DOM guess, not an API: anything that fails to parse yields no
-    messages rather than invented ones."""
-    body = text or ""
-    if own_body:
-        idx = body.rfind(own_body)
+_OWN_MARKS = ("You:", "Вы:", "Ты:")
+
+# The web client's own chrome: labels, buttons, stamps, contact names. None
+# of it is what a person typed back.
+_UI_WORDS = {"whatsapp", "telegram", "web", "type a message", "send", "search",
+             "voice message", "unread messages", "new chat", "chats", "starred",
+             "archives", "settings", "message", "собщение"}
+
+_CONTACTISH_RE = re.compile(r"^[\wА-Яа-яЁё][\wА-Яа-яЁё .,-]{1,40}$")
+
+
+def _norm_line(s: str) -> str:
+    """Fold the whitespace differences between our stored draft and the same
+    text as the page renders it, so matching one against the other works."""
+    return " ".join((s or "").split()).casefold()
+
+
+def _is_ui_noise(line: str) -> bool:
+    low = line.casefold()
+    if low in _UI_WORDS or low.rstrip(":") in _UI_WORDS:
+        return True
+    if re.fullmatch(r"[\d:.]+", line):          # a bare time stamp
+        return True
+    if re.search(r"\b\d{1,2}:\d{2}\b", line):   # a stamp glued to the bubble
+        return True
+    if re.search(r"\b(online|last seen|typing|прочитано|в сети|был[а]? )\b", low):
+        return True
+    return False
+
+
+def parse_inbound_chat(text: str, own_body: str) -> list[str]:
+    """The reply bubbles of ONE open chat, oldest first — nothing else.
+
+    The web clients give us the whole page, including the chat list with
+    other people's names and previews; those must never be read into this
+    thread. Only text below the chat header counts, only lines after our own
+    last sent message count, and UI noise is dropped. A DOM guess, not an
+    API: whatever fails to parse yields no messages rather than invented
+    ones. shortcut: heuristic parsing, redo on a real per-bubble DOM walk
+    when the web clients' markup allows querying single chats."""
+    body = (text or "").replace("\u200e", "").replace("\u200f", "")
+    norm_own = _norm_line(own_body)
+    if norm_own:
+        parts = [" ".join(chunk.split()) for chunk in body.splitlines()]
+        joined = "\n".join(parts)
+        idx = joined.find(norm_own)
         if idx >= 0:
-            body = body[idx + len(own_body):]
+            body = joined[idx + len(norm_own):]
     lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    skip_first = bool(lines and any(ch.isdigit() for ch in lines[0])
-                      and len(lines[0]) <= 6)   # a lone time stamp like "12:05"
+    keep_from = 0
+    for i, ln in enumerate(lines[:15]):
+        if _CONTACTISH_RE.match(ln) and i + 1 < len(lines) \
+                and lines[i + 1].lower() in ("online", "last seen today at "[:18],
+                                             "в сети", "печатает..."):
+            keep_from = i + 2   # the chat header: name plus its status line
+            break
     out = []
-    for ln in lines[1:] if (skip_first and lines) else lines:
-        if len(ln) < 2 or ln.isdigit():
+    for ln in lines[keep_from:]:
+        if len(ln) < 2 or _is_ui_noise(ln):
             continue
-        if ln.lower() in ("whatsapp", "type a message", "send", "voice message"):
+        for mark in _OWN_MARKS:
+            if ln.startswith(mark):
+                ln = ln[len(mark):].strip()
+        if len(ln) < 2 or _is_ui_noise(ln):
             continue
         out.append(ln)
     return out[:5]
 
 
+def parse_inbound_whatsapp(text: str, own_body: str) -> list[str]:
+    return parse_inbound_chat(text, own_body)
+
+
 def parse_inbound_telegram(text: str, own_body: str) -> list[str]:
-    """Same idea for Telegram Web; see parse_inbound_whatsapp."""
-    return parse_inbound_whatsapp(text, own_body)
+    return parse_inbound_chat(text, own_body)
 
 
 def chat_url(channel: str, handle: str) -> str:

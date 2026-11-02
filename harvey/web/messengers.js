@@ -150,7 +150,7 @@ async function coldApprovePersonal(id) {
 
 async function coldCancelApproved(id) {
   const data = await mPost('/api/messengers/cold/' + encodeURIComponent(id) + '/skip');
-  if (data && data.success) showToast('Отправлено с отменой: Harvey больше не уйдёт это сообщение.', 'success');
+  if (data && data.success) showToast('Отменено: Harvey не отправит это сообщение.', 'success');
   else showToast(failMsg(data, 'Не удалось отменить'), 'error');
   loadMessengers();
 }

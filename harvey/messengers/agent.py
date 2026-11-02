@@ -625,12 +625,16 @@ class MessengerAgent:
                     stored += 1
         # Opening chats to read costs browser visits like checking does: the
         # day's budget covers both, or the documented limit means nothing.
-        if stored:
+        # The stamp rides on the newest sent draft (its recheck is stale now);
+        # the counter charges every chat actually opened, reply or not.
+        if rows:
             await self.store._run(
                 """UPDATE messenger_outbox SET availability_checked_at = ?,
                           updated_at = CURRENT_TIMESTAMP
                    WHERE id = ? AND status = 'sent'""",
                 (_ts(_now()), rows[0]["item_id"]))
+        for _ in seen:
+            await self._charge_browser_visit()
         return stored
 
     def _personal_within_hours(self, pcfg) -> bool:

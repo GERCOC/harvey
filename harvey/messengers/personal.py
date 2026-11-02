@@ -445,6 +445,8 @@ class PersonalClient:
 
         Heuristic DOM reading of the open chat — never raises; an empty
         list means "nothing new" and costs one page visit."""
+        if not self.usable or not self._within_hours():
+            return []
         if self.blocked_reason:
             return []
         url = chat_url(self.channel, chat_ref)

@@ -328,19 +328,6 @@ class MessengerStore:
                    WHERE company_id = ? AND step = 2 AND status IN ('waiting', 'scheduled')""",
                 (row[0]["company_id"],))
 
-    async def cancel_approved_personal(self, item_id: str) -> bool:  # unused: the dashboard cancels via /skip
-        """You changed your mind before it went out: an approved-but-unsent
-        first message drops its follow-up too, like skip_cold does."""
-        item = await self.get_cold(item_id)
-        if not item or item["status"] != "approved" or item["step"] != 1:
-            return False
-        await self._run(
-            """UPDATE messenger_outbox SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
-               WHERE id = ?""",
-            (item_id,))
-        await self.cancel_cold_for(item["company_id"])
-        return True
-
     # ── Personal logins (the browser profile lives on disk; here only its state) ──
 
     async def personal_accounts(self) -> dict[str, dict]:

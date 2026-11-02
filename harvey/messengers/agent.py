@@ -554,6 +554,21 @@ class MessengerAgent:
                                             {"item": item["id"], "channel": item["channel"]})
         return sent
 
+    async def _browser_visits_today(self) -> int:
+        """Page visits charged to today's budget: availability checks plus
+        reply reads. A check stamps its draft's row; a read bumps this
+        counter, so max_checks_per_day covers both kinds of opening."""
+        checks = await self.store.checked_since(_utc_midnight())
+        stamp = _utc_midnight().strftime("%Y-%m-%d")
+        raw = await self.state.get_setting(f"personal_reads_{stamp}")
+        return checks + int(raw or 0)
+
+    async def _charge_browser_visit(self) -> None:
+        stamp = _utc_midnight().strftime("%Y-%m-%d")
+        key = f"personal_reads_{stamp}"
+        used = int((await self.state.get_setting(key)) or 0)
+        await self.state.set_setting(key, str(used + 1))
+
     async def read_personal_replies(self) -> int:
         """Read what they answered in chats Harvey itself opened from your
         account. The replies land in the same threads as bot messages, so
@@ -567,7 +582,7 @@ class MessengerAgent:
             return 0   # the kill switch stops the browser too
         if not self._personal_within_hours(pcfg):
             return 0   # reading opens pages like checking does: your hours only
-        room = pcfg.max_checks_per_day - await self.store.checked_since(_utc_midnight())
+        room = pcfg.max_checks_per_day - await self._browser_visits_today()
         if room <= 0:
             return 0   # the day's browser budget is spent on checks
         stored = 0

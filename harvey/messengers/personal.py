@@ -465,12 +465,17 @@ class MessengerLoginError(Exception):
     pass
 
 
-async def login(channel: str, headless: bool = False) -> bool:
-    """Interactive QR login for your own account; True once it is linked."""
+async def login(channel: str, headless: bool = False, session=None) -> bool:
+    """Interactive QR login for your own account; True once it is linked.
+
+    ``session`` lets tests drive the flow without a browser (shortcut: only
+    used by tests; production always builds its own BrowserSession)."""
     if channel not in PERSONAL_CHANNELS:
         raise MessengerLoginError(f"No personal login for {channel!r}: use telegram or whatsapp")
-    session = BrowserSession(channel, headless=headless)
+    own = session is None
+    session = session or BrowserSession(channel, headless=headless)
     try:
         return await session.qr_login()
     finally:
-        await session.stop()
+        if own:
+            await session.stop()

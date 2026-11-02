@@ -163,6 +163,8 @@ async def cold_replied(item_id: str, request: Request):
     item = await store.get_cold(item_id)
     if not item:
         return _refuse("No such message.", 404)
+    # cancel_cold_for also drops an 'approved' personal send: a no said
+    # after approving must reach the outbox before Harvey opens the browser.
     await store.cancel_cold_for(item["company_id"])
     thread = await store.thread_for(item["channel"], "manual",
                                     f"{item['channel']}:{item['handle']}",

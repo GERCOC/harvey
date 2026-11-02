@@ -19,7 +19,7 @@ from harvey.messengers import gate
 from harvey.messengers.bots import NO_TEXT, WhatsAppCloud, configured_bots
 from harvey.messengers.contacts import CHANNEL_LABELS, SIGNAL_FOR
 from harvey.messengers.personal import PERSONAL_CHANNELS, PersonalClient, REACHABLE, UNKNOWN
-from harvey.messengers.store import MessengerStore, _now
+from harvey.messengers.store import COLD_OPEN, MessengerStore, _now
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
 logger = logging.getLogger("harvey.messengers")
@@ -91,7 +91,8 @@ class MessengerAgent:
                            ("sent", self.send_approved), ("released", self.store.release_due),
                            ("drafted", self.draft_first_messages),
                            ("checked", self.check_personal_availability),
-                           ("personal_sent", self.send_approved_personal)):
+                           ("personal_sent", self.send_approved_personal),
+                           ("personal_replies", self.read_personal_replies)):
             try:
                 report[name] = await step()
             except Exception as e:

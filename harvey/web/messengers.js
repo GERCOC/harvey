@@ -87,7 +87,8 @@ async function loadMessengers() {
 
   html += '<div class="subhead">Первые сообщения <span class="hint">Отправляете вы, со своего аккаунта. ' +
     '«Открыть» копирует текст и открывает чат; потом нажмите «Отправил».</span></div>';
-  html += data.queue.length ? data.queue.map(coldCard).join('')
+  const cards = (data.queue || []).map(coldCard).concat((data.approved || []).map(approvedCard));
+  html += cards.length ? cards.join('')
     : '<div class="card">' + emptyState(icon('check'), 'Очередь пуста',
         'Когда профилирование найдёт на сайтах ссылки на Telegram, WhatsApp или VK, Harvey напишет первые сообщения сюда.') + '</div>';
 
@@ -145,6 +146,27 @@ async function coldApprovePersonal(id) {
   if (data && data.success) showToast('Одобрено. Harvey отправит это сообщение один раз с вашего аккаунта.', 'success');
   else showToast(failMsg(data, 'Не удалось одобрить'), 'error');
   loadMessengers();
+}
+
+async function coldCancelApproved(id) {
+  const data = await mPost('/api/messengers/cold/' + encodeURIComponent(id) + '/skip');
+  if (data && data.success) showToast('Отправлено с отменой: Harvey больше не уйдёт это сообщение.', 'success');
+  else showToast(failMsg(data, 'Не удалось отменить'), 'error');
+  loadMessengers();
+}
+
+function approvedCard(i) {
+  const who = i.company_name || i.company_domain || i.handle;
+  return '<div class="convo-card"><div class="convo-head">' +
+    '<span class="avatar">' + initials(who) + '</span><div><h3>' + escHtml(who) + '</h3><div class="sub">' +
+      escHtml(i.channel_label) + ' · ' + escHtml(i.handle) + '</div></div>' +
+    '<div class="tags">' + mBadge('approved') + '</div></div>' +
+    '<div class="muted">Одобрено к отправке с личного аккаунта. Harvey отправит этот текст один раз в следующем цикле, в ваши рабочие часы и в пределах дневного лимита.</div>' +
+    '<textarea class="form-input" rows="4" readonly>' + escHtml(i.body) + '</textarea>' +
+    '<div class="convo-actions">' +
+      '<button class="btn btn-ghost btn-sm" onclick="coldReplied(' + jsq(i.id) + ')">Ответили…</button>' +
+      '<button class="btn btn-ghost btn-sm push" onclick="coldCancelApproved(' + jsq(i.id) + ')">Отменить отправку</button>' +
+    '</div></div>';
 }
 
 async function coldSave(id, quiet) {

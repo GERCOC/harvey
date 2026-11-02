@@ -301,9 +301,7 @@ parts:
   undated raise alone doesn't bring the playbook, and is never written to as
   news.
 
-Harvey never reads ycombinator.com, the accelerators' directories, Crunchbase,
-PitchBook or LinkedIn, whose terms forbid scraping them; everything comes from
-the companies' own sites and your search provider.
+Everything comes from the companies' own sites and your search provider.
 
 **Looking for companies hiring a role?** `harvey discover --preset hiring
 --provider serper` (or *Look for: Companies hiring for your roles*) searches

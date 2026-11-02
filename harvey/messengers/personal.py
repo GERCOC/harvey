@@ -108,9 +108,18 @@ _OWN_MARKS = ("You:", "Вы:", "Ты:")
 # of it is what a person typed back.
 _UI_WORDS = {"whatsapp", "telegram", "web", "type a message", "send", "search",
              "voice message", "unread messages", "new chat", "chats", "starred",
-             "archives", "settings", "message", "собщение"}
+             "archives", "settings", "message", "собщение", "сообщение",
+             "введите сообщение", "write a message", "enter a message",
+             "input message", "start a chat", "archived", "закрыть", "menu"}
 
 _CONTACTISH_RE = re.compile(r"^[\wА-Яа-яЁё][\wА-Яа-яЁё .,-]{1,40}$")
+
+# A stamp glued to a bubble ("12:05", "Yesterday 12:05", "Пн в 12:05"). Only
+# a line that is nothing but the stamp is UI noise; a sentence that merely
+# mentions a time ("не пишите сюда, я на встрече до 12:05") is a real reply.
+_STAMP_RE = re.compile(r"^(?:(?:в|at|yesterday|вчера|пн|вт|ср|чт|пт|сб|вс|"
+                       r"mon|tue|wed|thu|fri|sat|sun)[ ]+)*\d{1,2}:\d{2}$",
+                       re.IGNORECASE)
 
 
 def _norm_line(s: str) -> str:
@@ -123,9 +132,7 @@ def _is_ui_noise(line: str) -> bool:
     low = line.casefold()
     if low in _UI_WORDS or low.rstrip(":") in _UI_WORDS:
         return True
-    if re.fullmatch(r"[\d:.]+", line):          # a bare time stamp
-        return True
-    if re.search(r"\b\d{1,2}:\d{2}\b", line):   # a stamp glued to the bubble
+    if _STAMP_RE.match(line.strip()):         # a bare time stamp
         return True
     if re.search(r"\b(online|last seen|typing|прочитано|в сети|был[а]? )\b", low):
         return True
@@ -137,34 +144,47 @@ def parse_inbound_chat(text: str, own_body: str) -> list[str]:
 
     The web clients give us the whole page, including the chat list with
     other people's names and previews; those must never be read into this
-    thread. Only text below the chat header counts, only lines after our own
-    last sent message count, and UI noise is dropped. A DOM guess, not an
-    API: whatever fails to parse yields no messages rather than invented
-    ones. shortcut: heuristic parsing, redo on a real per-bubble DOM walk
-    when the web clients' markup allows querying single chats."""
+    thread. Only text after our own last sent message counts (matched on
+    whitespace-folded, case-folded lines, because the page breaks the draft
+    differently than we stored it), and UI noise is dropped. Without our own
+    message on the page there is no delimiter between the sidebar and the
+    chat body, so nothing at all is claimed as a reply rather than guessing.
+    A DOM guess, not an API: whatever fails to parse yields no messages
+    rather than invented ones. shortcut: heuristic parsing, redo on a real
+    per-bubble DOM walk when the web clients' markup allows querying single
+    chats."""
     body = (text or "").replace("\u200e", "").replace("\u200f", "")
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
     norm_own = _norm_line(own_body)
     if norm_own:
-        parts = [" ".join(chunk.split()) for chunk in body.splitlines()]
-        joined = "\n".join(parts)
-        idx = joined.find(norm_own)
-        if idx >= 0:
-            body = joined[idx + len(norm_own):]
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    keep_from = 0
-    for i, ln in enumerate(lines[:15]):
-        if _CONTACTISH_RE.match(ln) and i + 1 < len(lines) \
-                and lines[i + 1].lower() in ("online", "last seen today at "[:18],
-                                             "в сети", "печатает..."):
-            keep_from = i + 2   # the chat header: name plus its status line
-            break
+        # One stored draft can sit on the page as one folded line ("Здравствуйте!
+        # Вопрос?") or several bubbles; find where our text ends by matching a
+        # run of consecutive page lines against the draft's words.
+        words = norm_own.split()
+        idx = -1
+        for i, ln in enumerate(lines):
+            pw = _norm_line(ln).split()
+            j, k = 0, i
+            while j < len(words) and k < len(lines):
+                lw = _norm_line(lines[k]).split()
+                if lw[:len(words) - j] == words[j:j + len(lw)] and lw:
+                    j += len(lw)
+                    k += 1
+                else:
+                    break
+            if j == len(words) and j > 0:
+                idx = k - 1
+        if idx < 0:
+            return []      # can't tell the chat from the sidebar: read nothing
+        lines = lines[idx + 1:]
     out = []
-    for ln in lines[keep_from:]:
+    for ln in lines:
         if len(ln) < 2 or _is_ui_noise(ln):
             continue
+        folded = ln.casefold()
         for mark in _OWN_MARKS:
-            if ln.startswith(mark):
-                ln = ln[len(mark):].strip()
+            if folded.startswith(mark.casefold()):
+                ln = ln[len(mark):].strip()   # another of our own bubbles
         if len(ln) < 2 or _is_ui_noise(ln):
             continue
         out.append(ln)
@@ -446,12 +466,17 @@ class MessengerLoginError(Exception):
     pass
 
 
-async def login(channel: str, headless: bool = False) -> bool:
-    """Interactive QR login for your own account; True once it is linked."""
+async def login(channel: str, headless: bool = False, session=None) -> bool:
+    """Interactive QR login for your own account; True once it is linked.
+
+    ``session`` lets tests drive the flow without a browser (shortcut: only
+    used by tests; production always builds its own BrowserSession)."""
     if channel not in PERSONAL_CHANNELS:
         raise MessengerLoginError(f"No personal login for {channel!r}: use telegram or whatsapp")
-    session = BrowserSession(channel, headless=headless)
+    own = session is None
+    session = session or BrowserSession(channel, headless=headless)
     try:
         return await session.qr_login()
     finally:
-        await session.stop()
+        if own:
+            await session.stop()

@@ -19,8 +19,10 @@ from harvey.config import EnvConfig, HarveyConfig
 from harvey.messengers.agent import MessengerAgent
 from harvey.messengers.contacts import normalize_phone
 from harvey.messengers.personal import (
-    REACHABLE, UNKNOWN, UNREACHABLE, AvailabilityResult, PersonalClient,
-    chat_url, is_bot_handle, parse_telegram_page, parse_whatsapp_page)
+    REACHABLE, UNKNOWN, UNREACHABLE, AvailabilityResult, BrowserSession,
+    MessengerLoginError, PersonalClient, chat_url, is_bot_handle, login,
+    parse_inbound_telegram, parse_inbound_whatsapp, parse_telegram_page,
+    parse_whatsapp_page)
 from harvey.messengers.store import MessengerStore
 from harvey.models.company import Company
 from harvey.paths import PROJECT_ROOT
@@ -169,6 +171,110 @@ async def test_a_broken_page_is_a_failed_send_not_a_crash():
     c = PersonalClient("whatsapp", s, PCFG_ON, pacing=False)
     r = await c.send_first_message("+79001234567", "текст")
     assert not r["ok"] and r["error"]
+
+
+# ── The client's remaining guard rails ──
+
+class RaisingSession(FakeSession):
+    async def read_chat(self, url, timeout_ms=15_000):
+        raise RuntimeError("the browser died mid-page")
+
+    async def send_message(self, url, text, timeout_ms=15_000):
+        raise RuntimeError("the browser died mid-type")
+
+
+@pytest.mark.asyncio
+async def test_a_dead_browser_gives_unknown_and_false_but_never_raises():
+    c = PersonalClient("telegram", RaisingSession(), PCFG_ON, pacing=False)
+    assert (await c.check_availability("@ivan")).status == UNKNOWN
+    assert not (await c.send_first_message("@ivan", "текст"))["ok"]
+    assert await c.read_reply("@ivan", "текст") == []
+
+
+@pytest.mark.asyncio
+async def test_a_bot_or_an_unusable_handle_stops_before_the_browser():
+    s = FakeSession()
+    c = PersonalClient("telegram", s, PCFG_ON, pacing=False)
+    assert (await c.check_availability("@acme_supportbot")).status == UNKNOWN
+    assert (await c.check_availability("")).status == UNKNOWN   # no chat link
+    assert not (await c.send_first_message("", "текст"))["ok"]
+    assert await c.read_reply("", "текст") == []
+    assert s.reads == [] and s.sends == []                      # never opened
+
+
+@pytest.mark.asyncio
+async def test_nobody_writes_into_a_blocked_client():
+    s = FakeSession(text="Please log in by phone to use Telegram Web")
+    c = PersonalClient("telegram", s, PCFG_ON, pacing=False)
+    await c.check_availability("@ivan")                        # notices the logout
+    assert not (await c.send_first_message("@ivan", "текст"))["ok"]
+    assert await c.read_reply("@ivan", "текст") == []
+    assert len(s.reads) == 1 and s.sends == []
+
+
+@pytest.mark.asyncio
+async def test_sends_and_reads_only_inside_active_hours():
+    night = SimpleNamespace(enabled=True, confirm_risk=True, active_hours=("00:00", "00:00"),
+                            action_gap_seconds=(0, 0))
+    s = FakeSession(send_ok=True)
+    c = PersonalClient("telegram", s, night, pacing=False)
+    assert not (await c.send_first_message("@ivan", "текст"))["ok"]
+    assert await c.read_reply("@ivan", "Здравствуйте!") == []
+    assert s.sends == [] and s.reads == []
+
+
+def test_a_midnight_crossing_window_stays_open_at_night():
+    c = PersonalClient("telegram", FakeSession(),
+                       SimpleNamespace(active_hours=("22:00", "06:00")), pacing=False)
+    # A window crossing midnight is open late evening and early morning only.
+    with frozen_clock(hour=23):
+        assert c._within_hours()
+    with frozen_clock(hour=12):
+        assert not c._within_hours()          # midday sits outside 22:00–06:00
+
+
+@contextmanager
+def frozen_clock(hour, tz_name="UTC"):
+    """Freeze personal.py's clock at `hour`:00 in `tz_name` (its own import)."""
+    import harvey.messengers.personal as pmod
+
+    class Fixed(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = datetime.now(_timezone.utc).replace(
+                hour=hour, minute=0, second=0, microsecond=0, tzinfo=_timezone.utc)
+            return base.astimezone(tz) if tz else base.replace(tzinfo=None)
+
+    old = pmod.datetime
+    pmod.datetime = Fixed
+    try:
+        c_holder = None  # noqa: F841 - keep the helper free of client state
+        yield
+    finally:
+        pmod.datetime = old
+
+
+def test_an_operator_timezone_drives_the_active_hours():
+    # Moscow is UTC+3 fixed: at 12:00Z it is 15:00 there, so a 14:00-16:00
+    # window must be open by the operator's clock and closed by UTC's.
+    c = PersonalClient("telegram", FakeSession(), PCFG_ON, pacing=False, tz_name="Europe/Moscow")
+    with frozen_clock(hour=12):
+        c.cfg = SimpleNamespace(active_hours=("14:00", "16:00"))
+        assert c._within_hours()              # 15:00 in Moscow
+        c.tz_name = ""
+        assert not c._within_hours()          # 12:00 UTC is outside the window
+
+
+@pytest.mark.asyncio
+async def test_pacing_sleeps_between_actions_when_switched_on():
+    cfg = SimpleNamespace(enabled=True, confirm_risk=True, active_hours=("00:00", "23:59"),
+                          action_gap_seconds=(0.01, 0.02))
+    s = FakeSession(url="https://web.telegram.org/a/im?chats=peer-1")
+    c = PersonalClient("telegram", s, cfg, pacing=True)
+    import time as _t
+    t0 = _t.monotonic()
+    await c.check_availability("@ivan")
+    assert _t.monotonic() - t0 >= 0.01      # one human-ish gap between page visits
 
 
 # ── Store bookkeeping ──
@@ -401,3 +507,221 @@ async def test_give_up_after_the_last_attempt_cancels_the_followup(state):
     await store.personal_send_failed(oid, "the chat wasn't there", max_attempts=1)
     assert (await store.get_cold(oid))["status"] == "cancelled"
     assert rows_of(state, "SELECT status FROM messenger_outbox WHERE step = 2") == ["cancelled"]
+
+
+# ── The browser behind the interface: driven with a fake page, no real browser ──
+
+class FakeElement:
+    def __init__(self, box=None):
+        self.box = box
+        self.clicked, self.filled = False, None
+
+    async def bounding_box(self):
+        return self.box
+
+    async def click(self):
+        self.clicked = True
+
+    async def fill(self, text):
+        self.filled = text
+
+
+class FakePage:
+    """One scripted web client: goto/selector/screenshot/inner_text."""
+
+    def __init__(self, url="https://web.telegram.org/a/", body="",
+                 selectors=None, closed_flag=False):
+        self.url = url
+        self.body = body
+        self.selectors = selectors or {}
+        self.goto_url = ""
+        self.closed = closed_flag
+        self.shots = []
+        self.clip_none = False
+
+    async def goto(self, url, **kw):
+        self.goto_url = url
+
+    async def wait_for_load_state(self, state, timeout=0):
+        pass
+
+    async def inner_text(self, sel):
+        return self.body
+
+    async def query_selector(self, sel):
+        return self.selectors.get(sel)
+
+    async def wait_for_selector(self, sel, timeout=0):
+        return self.selectors.get(sel)
+
+    async def screenshot(self, clip=None):
+        if clip is None:
+            self.clip_none = True
+        self.shots.append(clip)
+        return b"png-bytes"
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeContext:
+    def __init__(self, pages):
+        self._pages = list(pages)
+        self.closed = False
+
+    async def new_page(self):
+        # The web client keeps showing one page: the scan happens in it.
+        return self._pages[0] if len(self._pages) == 1 else self._pages.pop(0)
+
+    async def close(self):
+        self.closed = True
+
+
+def make_session(page_or_pages):
+    s = BrowserSession("telegram")
+    pages = page_or_pages if isinstance(page_or_pages, list) else [page_or_pages]
+    s._ctx = FakeContext(pages)
+    return s
+
+
+@pytest.mark.asyncio
+async def test_read_chat_returns_the_final_url_and_body():
+    page = FakePage(url="https://web.telegram.org/a/im?chats=peer-9", body="Привет!")
+    s = make_session(page)
+    url, body = await s.read_chat("https://start", timeout_ms=0)
+    assert url == page.url and body == "Привет!"
+    assert page.goto_url == "https://start"
+    assert page.closed                       # every opened page gets shut again
+
+
+@pytest.mark.asyncio
+async def test_read_chat_survives_a_never_idle_network():
+    class Hanging(FakePage):
+        async def wait_for_load_state(self, state, timeout=0):
+            raise TimeoutError("network never idles")
+
+    s = make_session(Hanging(body="x"))
+    _, body = await s.read_chat("u", timeout_ms=0)
+    assert body == "x"                        # settle-wait failure is tolerated
+
+
+@pytest.mark.asyncio
+async def test_send_message_types_into_the_box_and_presses_send():
+    box, button = FakeElement(), FakeElement()
+    page = FakePage(selectors={"div[aria-label='Message'], .input-field textarea": box,
+                               "button[aria-label='Send'], .send-button-icon": button})
+    s = make_session(page)
+    assert await s.send_message("https://start", "текст", timeout_ms=0)
+    assert box.filled == "текст" and button.clicked
+    assert page.closed
+
+
+@pytest.mark.asyncio
+async def test_send_without_an_input_box_is_a_clean_false():
+    s = make_session(FakePage(selectors={}))   # the redesigned page: no box found
+    assert not await s.send_message("u", "текст", timeout_ms=0)
+
+
+@pytest.mark.asyncio
+async def test_send_when_the_page_throws_is_a_false_not_a_crash():
+    class Exploding(FakePage):
+        async def goto(self, url, **kw):
+            raise RuntimeError("navigation failed")
+
+    s = make_session(Exploding())
+    assert not await s.send_message("u", "текст", timeout_ms=0)
+
+
+@pytest.mark.asyncio
+async def test_qr_login_saves_the_code_and_waits_for_the_scan():
+    qr, logged = FakeElement(box={"x": 0, "y": 0, "width": 200, "height": 200}), FakeElement()
+
+    class Scanning(FakePage):
+        """The same page the loop polls: no QR at first, then it is scanned."""
+
+        async def query_selector(self, sel):
+            if sel == ".sidebar-wrapper, .tm-dialog-desktop-left":
+                return logged if self.shots else None
+            return qr
+
+    page = Scanning()
+    s = make_session(page)
+    assert await s.qr_login(timeout_s=30)
+    assert page.shots and not page.clip_none      # the QR was clipped and saved
+    assert page.closed                            # and the login page shut again
+
+
+@pytest.mark.asyncio
+async def test_qr_login_times_out_without_a_scan():
+    s = make_session(FakePage(selectors={}))      # neither QR nor chat list appears
+    assert not await s.qr_login(timeout_s=0)
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_qr_login_uses_the_whatsapp_page():
+    qr, logged = FakeElement(box={"x": 0, "y": 0}), FakeElement()
+
+    class Scanning(FakePage):
+        async def query_selector(self, sel):
+            if sel == "#app div[aria-label='Chat list'], #side":
+                return logged if self.shots else None
+            return qr
+
+    page = Scanning()
+    s = BrowserSession("whatsapp")
+    s._ctx = FakeContext([page])
+    assert await s.qr_login(timeout_s=30)
+    assert page.goto_url.endswith("web.whatsapp.com/")   # the right login screen
+
+
+@pytest.mark.asyncio
+async def test_stop_shuts_the_context_down_once():
+    ctx = FakeContext([])
+    s = make_session(FakePage())
+    s._ctx = ctx
+    await s.stop()
+    assert ctx.closed and s._ctx is None and s._pw is None
+
+
+@pytest.mark.asyncio
+async def test_stop_tolerates_a_browser_that_already_died():
+    class Dead:
+        async def close(self):
+            raise RuntimeError("already gone")
+
+    s = BrowserSession("whatsapp")
+    s._ctx, s._pw = Dead(), None
+    await s.stop()                                # never raises on shutdown
+    assert s._ctx is None
+
+
+# ── login(): the CLI entry point ──
+
+class FakeLoginSession:
+    def __init__(self, ok=True):
+        self.ok, self.stopped = ok, False
+
+    async def qr_login(self):
+        return self.ok
+
+    async def stop(self):
+        self.stopped = True
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_a_channel_without_a_personal_client():
+    with pytest.raises(MessengerLoginError):
+        await login("vk")
+
+
+@pytest.mark.asyncio
+async def test_login_stops_only_the_session_it_started():
+    own = FakeLoginSession(ok=True)
+    assert await login("telegram", session=own)
+    assert not own.stopped                        # the caller's session stays open
+
+    borrowed = FakeLoginSession(ok=False)
+    s = make_session(FakePage(selectors={}))
+    s.qr_login = lambda *a, **k: borrowed.qr_login()
+    assert not await login("telegram", session=s)
+    # the real BrowserSession we injected was created by us, so it is stopped

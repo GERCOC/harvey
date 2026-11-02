@@ -11,7 +11,7 @@ import yaml
 from harvey.textio import read_user_text
 from dotenv import load_dotenv
 from pydantic import (
-    BaseModel, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
+    BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
 )
 
 from harvey.paths import PROJECT_ROOT
@@ -385,7 +385,9 @@ class MessengersConfig(BaseModel):
     whatsapp: WhatsAppCloudConfig = WhatsAppCloudConfig()
     # Personal-account checks and sends through the web clients (risky;
     # needs enabled + confirm_risk, and one approval per first message).
-    personal: PersonalMessengerConfig = PersonalMessengerConfig()
+    # default_factory, not a shared instance: pydantic v2 deep-copies model
+    # defaults on validation, which silently dropped caller-supplied values.
+    personal: PersonalMessengerConfig = Field(default_factory=PersonalMessengerConfig)
 
     @field_validator("channel_order")
     @classmethod

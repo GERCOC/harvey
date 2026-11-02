@@ -20,7 +20,7 @@ from harvey.messengers import gate
 from harvey.messengers.bots import NO_TEXT, WhatsAppCloud, configured_bots
 from harvey.messengers.contacts import CHANNEL_LABELS, SIGNAL_FOR
 from harvey.messengers.personal import PERSONAL_CHANNELS, PersonalClient, REACHABLE, UNKNOWN
-from harvey.messengers.store import COLD_OPEN, MessengerStore, _now
+from harvey.messengers.store import COLD_OPEN, MessengerStore, _now, _ts
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
 logger = logging.getLogger("harvey.messengers")
@@ -503,11 +503,23 @@ class MessengerAgent:
                 continue   # unverified: it waits for you to send it yourself
             if await self.store.personal_sent_since(_utc_midnight()) >= pcfg.max_sends_per_day:
                 break
+            # A linked thread that opted out must beat the approved queue.
+            # Before the first send there is no thread yet, so the check is
+            # by handle as well; both tables have a status column, hence the
+            # table-qualified name.
             thread = await self.store._rows(
-                """SELECT status FROM messenger_threads t
+                """SELECT t.status FROM messenger_threads t
                    JOIN messenger_outbox m ON m.thread_id = t.id WHERE m.id = ?""",
                 (item["id"],))
             if thread and thread[0]["status"] == "opted_out":
+                await self.store.skip_cold(item["id"])
+                continue
+            optout = await self.store._rows(
+                """SELECT 1 FROM messenger_threads
+                   WHERE channel = ? AND lower(handle) = lower(?) AND status = 'opted_out'
+                   LIMIT 1""",
+                (item["channel"], item["handle"]))
+            if optout:
                 await self.store.skip_cold(item["id"])
                 continue
             domain = item["company_domain"] or item["handle"].partition("@")[2]
@@ -578,23 +590,37 @@ class MessengerAgent:
                 """SELECT body FROM messenger_messages WHERE thread_id = ? AND direction = 'out'
                    ORDER BY created_at DESC, rowid DESC LIMIT 1""", (row["thread_id"],))
             for text in await client.read_reply(row["handle"], own[0]["body"] if own else ""):
-                # No provider id here, so the stamp alone can't stop a repeat:
-                # the same text already sitting unread would be re-answered
-                # every cycle, spending the model's budget on one message.
+                # No provider id here, so the unique stamp can't stop a
+                # repeat: the same text is never re-stored while it still
+                # sits unhandled, and once handled not until our newest
+                # outgoing message — anything older than that is history on
+                # the page, not a new reply. Without this bound the same
+                # "Нет, спасибо" would be stored again every cycle after the
+                # first answer, spending the model's budget on one message.
                 dup = await self.store._rows(
                     """SELECT 1 FROM messenger_messages WHERE thread_id = ? AND direction = 'in'
-                       AND body = ? AND status = 'received' LIMIT 1""",
-                    (row["thread_id"], text))
+                       AND body = ? AND (status = 'received'
+                            OR created_at > COALESCE((SELECT MAX(created_at) FROM messenger_messages
+                                                      WHERE thread_id = ? AND direction = 'out'), ''))
+                       LIMIT 1""",
+                    (row["thread_id"], text, row["thread_id"]))
                 if dup:
                     continue
                 if await self.store.add_inbound(row["thread_id"], text):
                     stored += 1
+        # Opening chats to read costs browser visits like checking does: the
+        # day's budget covers both, or the documented limit means nothing.
+        if stored:
+            await self.store._run(
+                """UPDATE messenger_outbox SET availability_checked_at = ?,
+                          updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND status = 'sent'""",
+                (_ts(_now()), rows[0]["item_id"]))
         return stored
 
-    @staticmethod
-    def _personal_within_hours(pcfg) -> bool:
+    def _personal_within_hours(self, pcfg) -> bool:
         start, end = pcfg.active_hours
-        now_hm = datetime.now(zoneinfo.ZoneInfo(operator_timezone())).strftime("%H:%M")
+        now_hm = datetime.now(zoneinfo.ZoneInfo(operator_timezone(self.config))).strftime("%H:%M")
         if start <= end:
             return start <= now_hm < end
         return now_hm >= start or now_hm < end   # a window crossing midnight

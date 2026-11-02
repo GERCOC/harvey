@@ -20,7 +20,8 @@ from harvey.messengers.agent import MessengerAgent
 from harvey.messengers.contacts import normalize_phone
 from harvey.messengers.personal import (
     REACHABLE, UNKNOWN, UNREACHABLE, AvailabilityResult, PersonalClient,
-    chat_url, is_bot_handle, parse_telegram_page, parse_whatsapp_page)
+    chat_url, is_bot_handle, parse_inbound_telegram, parse_inbound_whatsapp,
+    parse_telegram_page, parse_whatsapp_page)
 from harvey.messengers.store import MessengerStore
 from harvey.models.company import Company
 from harvey.paths import PROJECT_ROOT

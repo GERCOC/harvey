@@ -731,11 +731,13 @@ class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
     icp: ICPConfig
-    channels: ChannelsConfig = ChannelsConfig()
-    usage: UsageConfig = UsageConfig()
-    brain: BrainConfig = BrainConfig()
-    compliance: ComplianceConfig = ComplianceConfig()
-    writer: WriterConfig = WriterConfig()
+    # default_factory, not shared instances: pydantic v2 reuses a model-class
+    # default object across validations, which silently dropped caller values.
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    usage: UsageConfig = Field(default_factory=UsageConfig)
+    brain: BrainConfig = Field(default_factory=BrainConfig)
+    compliance: ComplianceConfig = Field(default_factory=ComplianceConfig)
+    writer: WriterConfig = Field(default_factory=WriterConfig)
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)

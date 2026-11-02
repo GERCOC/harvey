@@ -36,6 +36,8 @@ def make_config(personal=None, do_not_contact=()) -> HarveyConfig:
         personal = {"enabled": False, "confirm_risk": False}
     elif set(personal) != {"enabled"}:
         personal = {**on, **personal}
+    else:
+        personal = {**on, **personal}   # {"enabled": True} still needs confirm_risk from `on`
     data["channels"]["messengers"] = {"enabled": True, "personal": personal}
     data["compliance"]["do_not_contact"] = list(do_not_contact)
     data["persona"]["email"] = "anna@bookwell.example"

@@ -458,6 +458,7 @@ class MessengerAgent:
         paused = await self.state.get_setting("sending_paused")
         if paused:
             return 0   # the kill switch stops the browser too
+        await self.store.recheck_stale_availability()
         room = pcfg.max_checks_per_day - await self.store.checked_since(_utc_midnight())
         checked = 0
         for item in await self.store.unchecked_cold(max(room, 0)):

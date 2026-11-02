@@ -30,6 +30,12 @@ const M_INTENT = {
 };
 const M_CHANNEL = {telegram: 'Telegram', whatsapp: 'WhatsApp', vk: 'ВКонтакте'};
 
+const M_AVAILABILITY = {
+  reachable:   ['Доступен', 'good'],
+  unreachable: ['Нет аккаунта', 'bad'],
+  unknown:     ['Не проверен', 'idle'],
+};
+
 function mBadge(status) {
   const hit = own(M_STATUS, status) || [status, 'idle'];
   return '<span class="badge t-' + hit[1] + '">' + escHtml(hit[0]) + '</span>';
@@ -111,21 +117,34 @@ function coldCard(i) {
   const who = i.company_name || i.company_domain || i.handle;
   const site = safeHref(i.company_website);
   const full = (_msgr && _msgr.sent_today >= _msgr.daily_cap);
+  const personal = _msgr && _msgr.personal && _msgr.personal.enabled;
+  const avail = own(M_AVAILABILITY, i.availability) ? mBadge(i.availability) : '';
   return '<div class="convo-card" id="cold-' + escHtml(i.id) + '"><div class="convo-head">' +
     '<span class="avatar">' + initials(who) + '</span><div><h3>' + escHtml(who) + '</h3><div class="sub">' + escHtml(i.channel_label) + ' · ' + escHtml(i.handle) +
       (i.company_location ? ' · ' + escHtml(i.company_location) : '') +
       (site ? ' · <a href="' + site + '" target="_blank" rel="noopener noreferrer">сайт</a>' : '') + '</div></div>' +
-    '<div class="tags"><span class="tag">' + (i.step === 1 ? 'Первое' : 'Повтор') + '</span></div></div>' +
+    '<div class="tags"><span class="tag">' + (i.step === 1 ? 'Первое' : 'Повтор') + '</span>' + avail + '</div></div>' +
     (i.error ? '<div class="banner bad">' + icon('alert') + '<div><p>' + escHtml(i.error) + '</p></div></div>' : '') +
     '<textarea class="form-input" rows="5" id="cold-body-' + escHtml(i.id) + '">' + escHtml(i.body) + '</textarea>' +
     '<div class="convo-actions">' +
       '<button class="btn btn-primary btn-sm"' + (full ? ' disabled title="Дневной лимит исчерпан"' : '') +
         ' onclick="coldOpen(' + jsq(i.id) + ')">Открыть в ' + escHtml(i.channel_label) + '</button>' +
+      (personal && i.step === 1 && i.availability === 'reachable'
+        ? '<button class="btn btn-secondary btn-sm" title="Harvey отправит этот текст один раз с вашего аккаунта"' +
+          ' onclick="coldApprovePersonal(' + jsq(i.id) + ')">Отправить с личного аккаунта</button>'
+        : '') +
       '<button class="btn btn-secondary btn-sm" onclick="coldSent(' + jsq(i.id) + ')">Отправил</button>' +
       '<button class="btn btn-ghost btn-sm push" onclick="coldSave(' + jsq(i.id) + ')">Сохранить текст</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="coldReplied(' + jsq(i.id) + ')">Ответили…</button>' +
       '<button class="btn btn-ghost btn-sm" onclick="coldSkip(' + jsq(i.id) + ')">Пропустить</button>' +
     '</div></div>';
+}
+
+async function coldApprovePersonal(id) {
+  const data = await mPost('/api/messengers/cold/' + encodeURIComponent(id) + '/approve-personal');
+  if (data && data.success) showToast('Одобрено. Harvey отправит это сообщение один раз с вашего аккаунта.', 'success');
+  else showToast(failMsg(data, 'Не удалось одобрить'), 'error');
+  loadMessengers();
 }
 
 async function coldSave(id, quiet) {

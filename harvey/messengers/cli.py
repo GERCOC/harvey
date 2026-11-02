@@ -1,4 +1,5 @@
-"""`harvey messengers`: status, a token check, and the WhatsApp webhook."""
+"""`harvey messengers`: status, a token check, the WhatsApp webhook, a
+personal-account QR login, and approving one personal send by id."""
 
 import asyncio
 
@@ -44,6 +45,38 @@ def cmd_messengers(args):
             print(f"\n  {'Signed in.' if ok else 'Not signed in.'}\n")
 
         asyncio.run(_login())
+        return
+
+    if action == "send":
+        # The approval by terminal: Harvey sends this exact draft once from
+        # your logged-in personal account, on the next heartbeat.
+        async def _send():
+            state = StateManager()
+            await state.init_db()
+            store = MessengerStore(state)
+            item = await store.get_cold(args.item_id)
+            if not item or item["step"] != 1 or item["status"] != "pending_review":
+                print("\n  No first message with that id is waiting for approval.\n")
+                return
+            pcfg = cfg.personal
+            if not (pcfg.enabled and pcfg.confirm_risk):
+                print("\n  Personal sending is off: set channels.messengers.personal.enabled")
+                print("  and confirm_risk: true first (docs/messengers.md).\n")
+                return
+            if item["availability"] != "reachable":
+                print(f"\n  {item['channel']} · {item['handle']}: Harvey hasn't confirmed"
+                      " this contact is reachable.")
+                print("  Send it yourself with the dashboard link instead.\n")
+                return
+            if not await store.approve_cold(args.item_id):
+                print("\n  This message can't be approved now.\n")
+                return
+            await state.log_action("messenger_personal_approved", "cli", {"item": args.item_id})
+            print(f"\n  Approved. Body:\n\n    {item['body']}\n")
+            print("  Harvey sends it once from your own account on the next heartbeat,")
+            print("  inside your active hours and daily limits.\n")
+
+        asyncio.run(_send())
         return
 
     async def _run():
@@ -95,13 +128,17 @@ def cmd_messengers(args):
 
 def add_parser(subparsers):
     sub = subparsers.add_parser(
-        "messengers", help="Telegram, WhatsApp and VK: status, token check, WhatsApp webhook")
+        "messengers", help="Telegram, WhatsApp and VK: status, token check, WhatsApp webhook,"
+                           " personal-account login and sends")
     sub.add_argument("messengers_action", nargs="?", default="status",
-                     choices=["status", "test", "whatsapp-webhook", "login"],
+                     choices=["status", "test", "whatsapp-webhook", "login", "send"],
                      help="status (default), test the bot tokens, run the WhatsApp webhook,"
-                          " or sign a personal account in with a QR code")
+                          " sign a personal account in with a QR code,"
+                          " or approve one personal send by id")
     sub.add_argument("channel", nargs="?", default="", choices=["", "telegram", "whatsapp"],
                      help="login: which personal account to sign in")
+    sub.add_argument("item_id", nargs="?", default="",
+                     help="send: the id of the reachable first message to approve for sending")
     sub.add_argument("--host", default="127.0.0.1",
                      help="whatsapp-webhook: address to listen on (default 127.0.0.1, behind a proxy)")
     sub.add_argument("--port", type=int, default=8787, help="whatsapp-webhook: port (default 8787)")

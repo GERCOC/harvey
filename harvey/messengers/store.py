@@ -228,6 +228,18 @@ class MessengerStore:
                AND availability IN ('', 'unknown') ORDER BY created_at LIMIT ?""",
             (int(limit),))
 
+    async def recheck_stale_availability(self, older_than_days: int = 7) -> int:
+        """A checked-but-unreachable draft whose check went stale becomes
+        unknown again, so the next pass looks at it once more. A contact who
+        wasn't there in July may be there in November; without this the old
+        verdict would sit on the draft forever."""
+        cutoff = _ts(_now() - timedelta(days=int(older_than_days)))
+        return await self._run(
+            """UPDATE messenger_outbox SET availability = 'unknown', updated_at = CURRENT_TIMESTAMP
+               WHERE step = 1 AND status = 'pending_review' AND availability = 'unreachable'
+               AND availability_checked_at < ?""",
+            (cutoff,))
+
     async def set_availability(self, item_id: str, status: str) -> None:
         await self._run(
             """UPDATE messenger_outbox SET availability = ?, availability_checked_at = ?,

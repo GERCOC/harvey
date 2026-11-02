@@ -60,20 +60,20 @@ def cmd_install(args):
         sys.exit(1)
     print("  ✓ Python packages installed.\n")
 
-    # Install Playwright browsers
-    print("  [2/2] Installing Playwright browsers...")
+    # Install the browser for LinkedIn scraping and personal-account checks
+    print("  [2/2] Installing the Chromium browser (patchright)...")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
+            [sys.executable, "-m", "patchright", "install", "chromium"],
             timeout=600,
         )
         playwright_ok = result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         playwright_ok = False
     if not playwright_ok:
-        print("\n  Playwright browser install failed (optional — needed for LinkedIn).")
+        print("  Browser install failed (optional — needed for LinkedIn and personal messengers).")
     else:
-        print("  ✓ Playwright browsers installed.\n")
+        print("  ✓ Chromium installed.\n")
 
     _ensure_importable(args._project_root)
     print("  Harvey is installed. Run 'harvey setup' next.\n")

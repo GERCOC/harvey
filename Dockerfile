@@ -16,7 +16,7 @@ WORKDIR /app
 # then Chromium + its system libraries in the same layer cleanup pass.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && playwright install --with-deps chromium \
+    && patchright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
 # Match the checkout owner on Linux; remain non-root.

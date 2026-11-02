@@ -598,6 +598,34 @@ MIGRATIONS: list[str] = [
     CREATE INDEX IF NOT EXISTS idx_messenger_messages_status
         ON messenger_messages(direction, status);
     """,
+    # ── v16: personal-account messengers (harvey/messengers/personal.py) ──
+    """
+    -- Availability of a published contact, checked from your own account in
+    -- the browser (Telegram Web / WhatsApp Web), not an official API. This
+    -- is risky by design: only an opted-in operator turns it on, and the
+    -- first message still goes nowhere without their explicit approval.
+    -- reachable: the chat opened and the account exists; unknown: nothing
+    -- could be told (no session, timeout, layout change); unreachable: the
+    -- service itself says there is no such account.
+    ALTER TABLE messenger_outbox ADD COLUMN availability TEXT DEFAULT '';
+    ALTER TABLE messenger_outbox ADD COLUMN availability_checked_at TIMESTAMP;
+
+    -- One row per personal login you keep signed in for Harvey's checks.
+    -- ``session_path`` points at the browser profile directory holding the
+    -- cookies — credentials in themselves, so the path is stored, never the
+    -- session data, and the file lives under data/ with mode 0700.
+    CREATE TABLE IF NOT EXISTS messenger_personal_accounts (
+        channel TEXT PRIMARY KEY,
+        transport TEXT DEFAULT 'web',
+        display_name TEXT DEFAULT '',
+        session_path TEXT DEFAULT '',
+        status TEXT DEFAULT 'logged_out',
+        last_error TEXT DEFAULT '',
+        qr_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")

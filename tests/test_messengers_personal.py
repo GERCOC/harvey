@@ -30,14 +30,15 @@ from harvey.state import StateManager
 
 def make_config(personal=None, do_not_contact=()) -> HarveyConfig:
     data = yaml.safe_load((PROJECT_ROOT / "harvey.yaml").read_text(encoding="utf-8"))
-    on = {"enabled": True, "confirm_risk": True, "active_hours": ["00:00", "23:59"]}
+    # The shipped harvey.yaml pins active_hours to business hours; every test
+    # below runs at an arbitrary clock time, so the window opens all day.
+    on = {"enabled": True, "confirm_risk": True, "active_hours": ["00:00", "23:59"],
+          "action_gap_seconds": [0.0, 0.0]}
     # personal=None means "the personal path is off"; a dict tweaks the on-config
     if personal is None:
         personal = {"enabled": False, "confirm_risk": False}
-    elif set(personal) != {"enabled"}:
-        personal = {**on, **personal}
     else:
-        personal = {**on, **personal}   # {"enabled": True} still needs confirm_risk from `on`
+        personal = {**on, **personal}
     data["channels"]["messengers"] = {"enabled": True, "personal": personal}
     data["compliance"]["do_not_contact"] = list(do_not_contact)
     data["persona"]["email"] = "anna@bookwell.example"
@@ -272,7 +273,8 @@ async def test_only_approved_and_reachable_drafts_are_sent_exactly_once(state):
 
 @pytest.mark.asyncio
 async def test_the_kill_switch_stops_checks_and_sends(state):
-    await _seed_draft(state, availability=REACHABLE)
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    await MessengerStore(state).approve_cold(oid)
     s = FakeSession(url="https://web.telegram.org/a/im?chats=peer-1", send_ok=True)
     a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)})
     await a.state.set_setting("sending_paused", "paused by hand")

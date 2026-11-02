@@ -30,12 +30,13 @@ from harvey.state import StateManager
 
 def make_config(personal=None, do_not_contact=()) -> HarveyConfig:
     data = yaml.safe_load((PROJECT_ROOT / "harvey.yaml").read_text(encoding="utf-8"))
-    messengers = {"enabled": True,
-                  "personal": {"enabled": True, "confirm_risk": True,
-                               "active_hours": ["00:00", "23:59"], **(personal or {})}}
+    on = {"enabled": True, "confirm_risk": True, "active_hours": ["00:00", "23:59"]}
+    # personal=None means "the personal path is off"; a dict tweaks the on-config
     if personal is None:
-        messengers["personal"] = {"enabled": False, "confirm_risk": False}
-    data["channels"]["messengers"] = messengers
+        personal = {"enabled": False, "confirm_risk": False}
+    elif set(personal) != {"enabled"}:
+        personal = {**on, **personal}
+    data["channels"]["messengers"] = {"enabled": True, "personal": personal}
     data["compliance"]["do_not_contact"] = list(do_not_contact)
     data["persona"]["email"] = "anna@bookwell.example"
     return HarveyConfig(**data)

@@ -628,8 +628,10 @@ MIGRATIONS: list[str] = [
     """,
     # ── v17: capped retries for personal sends (harvey/messengers/agent.py) ──
     """
-    -- Failed browser sends move back to pending_review with a counter;
-    -- without a cap every heartbeat would reopen the browser forever.
+    -- Failed browser sends stay approved with a counter; after the cap the
+    -- draft is cancelled outright. Without a cap every heartbeat would
+    -- reopen the browser forever, and a retry of a send that actually went
+    -- through would message the same person twice.
     ALTER TABLE messenger_outbox ADD COLUMN send_attempts INTEGER DEFAULT 0;
     """,
 ]

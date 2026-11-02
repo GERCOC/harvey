@@ -277,7 +277,9 @@ class MessengerStore:
 
     async def mark_cold_personal_sent(self, item_id: str, followup_days: int) -> bool:
         """Harvey sent this approved first message from your own account.
-        Same bookkeeping as a manual send: its follow-up becomes due later."""
+        Same bookkeeping as a manual send: its follow-up becomes due later.
+        The update is guarded by the 'approved' status, so a second pass on
+        an already-sent draft can never move it or count as another send."""
         now = _now()
         async with self.state._connect() as db:
             cur = await db.execute(
@@ -311,8 +313,22 @@ class MessengerStore:
                       updated_at = CURRENT_TIMESTAMP
                WHERE id = ? AND status = 'approved'""",
             (error[:500], int(max_attempts), item_id))
+        # Whatever left the retry loop is final: its follow-up must not sit
+        # in the queue forever waiting for a first message that never goes.
+        if await self._rows(
+                "SELECT 1 FROM messenger_outbox WHERE id = ? AND status = 'cancelled'",
+                (item_id,)):
+            await self.cancel_cold_for_company_unsent(item_id)
 
-    async def cancel_approved_personal(self, item_id: str) -> bool:
+    async def cancel_cold_for_company_unsent(self, item_id: str) -> None:
+        row = await self._rows("SELECT company_id FROM messenger_outbox WHERE id = ?", (item_id,))
+        if row and row[0]["company_id"]:
+            await self._run(
+                """UPDATE messenger_outbox SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                   WHERE company_id = ? AND step = 2 AND status IN ('waiting', 'scheduled')""",
+                (row[0]["company_id"],))
+
+    async def cancel_approved_personal(self, item_id: str) -> bool:  # unused: the dashboard cancels via /skip
         """You changed your mind before it went out: an approved-but-unsent
         first message drops its follow-up too, like skip_cold does."""
         item = await self.get_cold(item_id)

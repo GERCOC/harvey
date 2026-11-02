@@ -7,8 +7,8 @@ is invented."""
 import os
 import sqlite3
 import tempfile
-from contextlib import closing
-from datetime import datetime
+from contextlib import closing, contextmanager
+from datetime import datetime, timezone as _timezone
 from types import SimpleNamespace
 
 import pytest

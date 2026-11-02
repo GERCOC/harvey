@@ -447,6 +447,8 @@ class PersonalClient:
         list means "nothing new" and costs one page visit."""
         if self.blocked_reason:
             return []
+        if not self._within_hours():
+            return []   # reading opens pages like checking does: your hours only
         url = chat_url(self.channel, chat_ref)
         if not url:
             return []

@@ -192,7 +192,9 @@ class MessengerStore:
         return True
 
     async def skip_cold(self, item_id: str) -> bool:
-        """Not sending it. Skipping a first message drops its follow-up too."""
+        """Not sending it — even after you approved a personal send: an
+        approval is revocable until the message has actually gone out.
+        Skipping a first message drops its follow-up too."""
         item = await self.get_cold(item_id)
         if not item or item["status"] not in COLD_OPEN:
             return False

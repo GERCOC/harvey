@@ -14,6 +14,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from harvey.config import operator_timezone
 from harvey.messengers import gate
 from harvey.messengers.bots import NO_TEXT, WhatsAppCloud, configured_bots
 from harvey.messengers.contacts import CHANNEL_LABELS, SIGNAL_FOR
@@ -73,7 +74,8 @@ class MessengerAgent:
         except Exception as e:
             logger.warning(f"Personal {channel}: the browser didn't start: {type(e).__name__}")
             return None
-        client = PersonalClient(channel, session, pcfg, pacing=self.send_pacing)
+        client = PersonalClient(channel, session, pcfg, pacing=self.send_pacing,
+                                tz_name=operator_timezone(self.config))
         self.personal_clients[channel] = client
         return client
 
@@ -506,9 +508,11 @@ class MessengerAgent:
                 continue   # no login for this channel; other channels carry on
             result = await client.send_first_message(item["handle"], item["body"])
             if not result["ok"]:
-                await self.store._run(
-                    "UPDATE messenger_outbox SET error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (result["error"][:500], item["id"]))
+                # Count the try: after a few failures the draft leaves the
+                # queue, so an unconfirmed send is never retried forever
+                # (the first attempt may have gone through after all).
+                await self.store.personal_send_failed(
+                    item["id"], result["error"], max_attempts=pcfg.max_send_attempts)
                 continue
             thread = await self.store.thread_for(
                 item["channel"], "manual", f"{item['channel']}:{item['handle']}",

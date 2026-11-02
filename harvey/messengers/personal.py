@@ -254,11 +254,12 @@ class PersonalClient:
     in production, a fake in tests); nothing here touches Playwright types.
     """
 
-    def __init__(self, channel: str, session, cfg, pacing: bool = True):
+    def __init__(self, channel: str, session, cfg, pacing: bool = True, tz_name: str = ""):
         self.channel = channel
         self.session = session
         self.cfg = cfg
         self.pacing = pacing
+        self.tz_name = tz_name   # the operator's zone; empty means UTC
         self.blocked_reason = ""   # set when the service pushes us away
 
     @property
@@ -267,7 +268,11 @@ class PersonalClient:
 
     def _within_hours(self) -> bool:
         start, end = self.cfg.active_hours
-        now_hm = _now().strftime("%H:%M")
+        if self.tz_name:
+            import pytz
+            now_hm = datetime.now(pytz.timezone(self.tz_name)).strftime("%H:%M")
+        else:
+            now_hm = _now().strftime("%H:%M")
         if start <= end:
             return start <= now_hm < end
         return now_hm >= start or now_hm < end   # a window crossing midnight

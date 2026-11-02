@@ -221,7 +221,11 @@ async function coldReplied(id) {
 function threadCard(t) {
   const name = t.display_name || t.company_name || t.handle || t.chat_id;
   const mine = t.transport === 'manual';
-  const msgs = (t.messages || []).map(m =>
+  // Personal sending on and a channel with a web client: Harvey can type the
+  // approved answer in itself; otherwise you copy it.
+  const viaHarvey = mine && _msgr && _msgr.personal && _msgr.personal.enabled &&
+    (t.channel === 'telegram' || t.channel === 'whatsapp');
+  const msgs =(t.messages || []).map(m =>
     '<div class="thread-msg ' + (m.direction === 'out' ? 'sent' : 'received') + '"><div class="sender">' +
     (m.direction === 'out' ? 'Вы' : escHtml(name)) + ' · ' + relTime(m.sent_at || m.created_at) + '</div>' +
     escHtml(m.body) + '</div>').join('');
@@ -231,26 +235,56 @@ function threadCard(t) {
     '<textarea class="form-input" rows="4" id="mm-body-' + escHtml(d.id) + '">' + escHtml(d.body) + '</textarea>' +
     '<div class="convo-actions">' +
       (mine
-        ? '<button class="btn btn-primary btn-sm" onclick="msgCopied(' + jsq(d.id) + ')">Скопировать и отметить отправленным</button>'
+        ? (viaHarvey && d.status === 'approved'
+            ? '<span class="muted">Harvey отправит из вашего аккаунта в следующем цикле</span>'
+            : (viaHarvey ? '<button class="btn btn-primary btn-sm" onclick="msgApprove(' + jsq(d.id) + ')">Одобрить: Harvey отправит</button>' : '') +
+              '<button class="btn ' + (viaHarvey ? 'btn-secondary' : 'btn-primary') + ' btn-sm" onclick="msgCopied(' + jsq(d.id) + ')">Скопировать и отметить отправленным</button>')
         : d.status === 'approved' ? '<span class="muted">Уйдёт в следующем цикле</span>'
         : '<button class="btn btn-primary btn-sm" onclick="msgApprove(' + jsq(d.id) + ')">Одобрить</button>') +
       (d.status !== 'approved' ? '<button class="btn btn-ghost btn-sm push" onclick="msgSave(' + jsq(d.id) + ')">Сохранить текст</button>' : '') +
       '<button class="btn btn-ghost btn-sm' + (d.status === 'approved' ? ' push' : '') + '" onclick="msgAction(' + jsq(d.id) + ',\'reject\')">Отклонить</button>' +
     '</div></div>').join('');
   const intent = t.intent && own(M_INTENT, t.intent) ? '<span class="tag">' + M_INTENT[t.intent] + '</span>' : '';
+  const apTag = t.autopilot ? '<span class="tag">автопилот (тест)</span>' : '';
   const reason = t.status_reason && t.status !== 'open' ? '<div class="muted">' + escHtml(t.status_reason) + '</div>' : '';
   return '<div class="convo-card"><div class="convo-head">' +
     '<span class="avatar">' + initials(name) + '</span><div><h3>' + escHtml(name) + '</h3><div class="sub">' + escHtml(own(M_CHANNEL, t.channel) || t.channel) +
       (mine ? ' · ваш аккаунт' : ' · бот') + (t.handle ? ' · ' + escHtml(t.handle) : '') +
       (t.last_inbound_at ? ' · ' + relTime(t.last_inbound_at) : '') + '</div>' + reason + '</div>' +
-    '<div class="tags">' + intent + mBadge(t.status) + '</div></div>' +
+    '<div class="tags">' + apTag + intent + mBadge(t.status) + '</div></div>' +
     '<div class="thread">' + (msgs || '<p class="muted">Сообщений пока нет.</p>') + drafts + '</div>' +
     '<div class="convo-actions"><span class="push"></span>' +
       (mine ? '<button class="btn btn-secondary btn-sm" onclick="threadPaste(' + jsq(t.id) + ')">Вставить их ответ…</button>' : '') +
+      (viaHarvey && t.status === 'open'
+        ? (t.autopilot
+            ? '<button class="btn btn-ghost btn-sm" onclick="threadAutopilot(this,' + jsq(t.id) + ',false)">Выключить автопилот</button>'
+            : '<button class="btn btn-ghost btn-sm" title="Эксперимент. Нажмите дважды." onclick="threadAutopilot(this,' + jsq(t.id) + ',true)">Автопилот (тест)</button>')
+        : '') +
       (t.status !== 'open' && t.status !== 'opted_out' ? '<button class="btn btn-ghost btn-sm" onclick="threadStatus(' + jsq(t.id) + ',\'open\')">Вернуть Harvey</button>' : '') +
       (t.status !== 'closed' && t.status !== 'opted_out' ? '<button class="btn btn-ghost btn-sm" onclick="threadStatus(' + jsq(t.id) + ',\'closed\')">Закрыть</button>' : '') +
       (t.status !== 'opted_out' ? '<button class="btn btn-ghost btn-sm" onclick="threadStatus(' + jsq(t.id) + ',\'opted_out\')">Больше не писать</button>' : '') +
     '</div></div>';
+}
+
+// EXPERIMENT. Turning autopilot on takes two presses within five seconds:
+// the first re-labels the button, the second sends the confirmation.
+let _apArm = {id: '', until: 0, label: ''};
+async function threadAutopilot(btn, id, on) {
+  if (on) {
+    const now = Date.now();
+    if (_apArm.id !== id || now > _apArm.until) {
+      _apArm = {id: id, until: now + 5000, label: btn.textContent};
+      btn.textContent = 'Ещё раз: Harvey будет отвечать сам';
+      setTimeout(() => { if (_apArm.id === id && btn.isConnected) btn.textContent = _apArm.label; }, 5000);
+      return;
+    }
+    _apArm = {id: '', until: 0, label: ''};
+  }
+  const data = await mPost('/api/messengers/threads/' + encodeURIComponent(id) + '/autopilot',
+                           {on: !!on, confirm: !!on});
+  if (data && data.success) showToast(on ? 'Автопилот (тест) включён для этого диалога' : 'Автопилот выключен', 'success');
+  else showToast(failMsg(data, 'Не удалось изменить автопилот'), 'error');
+  loadMessengers();
 }
 
 async function msgSave(id, quiet) {

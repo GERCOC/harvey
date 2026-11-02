@@ -213,6 +213,34 @@ async def thread_status(thread_id: str, request: Request):
     return {"success": True}
 
 
+@router.post("/api/messengers/threads/{thread_id}/autopilot")
+async def thread_autopilot(thread_id: str, request: Request):
+    """EXPERIMENT. Put one conversation in your own account on autopilot, or
+    take it off. Switching on needs ``confirm`` (the dashboard asks for a
+    second press); switching off is always one call."""
+    body = await _body(request)
+    on = body.get("on") is True
+    store, config, state = await _ctx()
+    thread = await store.get_thread(thread_id)
+    if not thread:
+        return _refuse("No such conversation.", 404)
+    if on:
+        if body.get("confirm") is not True:
+            return _refuse("Autopilot needs a second, explicit confirmation.", 400)
+        pcfg = config.channels.messengers.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return _refuse("Personal sending is off: channels.messengers.personal needs enabled "
+                           "and confirm_risk (docs/messengers.md).")
+        if thread["transport"] != "manual" or thread["channel"] not in ("telegram", "whatsapp"):
+            return _refuse("Autopilot is only for a Telegram or WhatsApp conversation in your own account.")
+        if thread["status"] != "open":
+            return _refuse("Autopilot starts only in an open conversation.")
+    await store.set_autopilot(thread_id, on)
+    await state.log_action("messenger_autopilot_on" if on else "messenger_autopilot_off",
+                           "dashboard", {"thread": thread_id})
+    return {"success": True}
+
+
 @router.post("/api/messengers/messages/{message_id}/{action}")
 async def message_action(message_id: str, action: str, request: Request):
     store, _, _ = await _ctx()
@@ -221,7 +249,13 @@ async def message_action(message_id: str, action: str, request: Request):
         return _refuse("No such draft.", 404)
     if action == "approve":
         if msg["transport"] != "bot":
-            return _refuse("This conversation is in your own account: copy the text and send it there.")
+            # A conversation in your own account: Harvey types the approved
+            # answer in through the browser only when personal sending is on.
+            _, config, _ = await _ctx()
+            pcfg = config.channels.messengers.personal
+            if not (pcfg.enabled and pcfg.confirm_risk and msg["channel"] in ("telegram", "whatsapp")):
+                return _refuse("This conversation is in your own account: copy the text and send it "
+                               "there, or turn on personal sending (docs/messengers.md).")
         ok = await store.approve_message(message_id, by="you")
     elif action == "copied":
         if msg["transport"] != "manual" or msg["status"] not in ("pending_review", "held"):

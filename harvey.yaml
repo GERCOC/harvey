@@ -113,6 +113,10 @@ channels:
       max_sends_per_day: 5       # approved first messages sent through the browser
       action_gap_seconds: [20.0, 90.0]   # random pause between browser actions
       max_send_attempts: 3       # after this an unconfirmed send leaves the queue
+      # EXPERIMENT: per-conversation autopilot (Messengers → Dialogs, button
+      # pressed twice). Harvey then answers in that conversation without asking
+      # each time, up to this many answers, then it asks you again.
+      autopilot_max_replies: 5
     telegram:
       enabled: false             # TELEGRAM_BOT_TOKEN in .env (from @BotFather)
       # welcome: sent once when someone presses Start; "" sends nothing.

@@ -339,6 +339,10 @@ class PersonalMessengerConfig(BaseModel):
     # page may have accepted the message even though the script didn't see
     # it, and blind retries are how people get messaged twice.
     max_send_attempts: int = 3
+    # Experimental: in a conversation you put on autopilot (dashboard, behind
+    # a double click) Harvey sends its own answers without asking each time.
+    # At most this many automatic answers per conversation, then it asks you.
+    autopilot_max_replies: int = Field(5, ge=1, le=50)
 
     @field_validator("active_hours")
     @classmethod

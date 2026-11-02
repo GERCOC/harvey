@@ -634,6 +634,14 @@ MIGRATIONS: list[str] = [
     -- through would message the same person twice.
     ALTER TABLE messenger_outbox ADD COLUMN send_attempts INTEGER DEFAULT 0;
     """,
+    # ── v18: experimental autopilot for one personal-account conversation ──
+    """
+    -- 1 = you switched this conversation to autopilot (dashboard, behind a
+    -- double click): Harvey sends its own answers in it without asking each
+    -- time, up to personal.autopilot_max_replies. Per conversation, never
+    -- global; any stop (opt-out, a person needed, closed) clears it.
+    ALTER TABLE messenger_threads ADD COLUMN autopilot INTEGER DEFAULT 0;
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")

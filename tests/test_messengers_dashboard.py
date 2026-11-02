@@ -99,7 +99,7 @@ def test_they_answered_cancels_the_follow_up_and_starts_a_thread(mclient):
         ("out", "Здравствуйте"), ("in", "А сколько ст")]
 
 
-def test_drafts_in_your_own_account_are_copied_not_approved(mclient):
+def test_drafts_in_your_own_account_are_copied_unless_personal_sending_is_on(mclient):
     async def go():
         store = MessengerStore(StateManager(str(mclient.db_path)))
         await store.state.init_db()
@@ -115,6 +115,79 @@ def test_drafts_in_your_own_account_are_copied_not_approved(mclient):
     assert mclient.post(f"/api/messengers/messages/{theirs}/approve").json()["success"]
     assert q(mclient.db_path, "SELECT body, status, approved_by FROM messenger_messages WHERE id = ?", (theirs,)) == [
         ("От 2 900 ₽ в месяц.", "approved", "you")]
+
+
+def test_personal_sending_lets_you_approve_an_answer_in_your_own_account(mclient, monkeypatch, tmp_path):
+    data = yaml.safe_load((PROJECT_ROOT / "harvey.yaml").read_text(encoding="utf-8"))
+    data["channels"]["messengers"] = {"enabled": True,
+                                      "personal": {"enabled": True, "confirm_risk": True}}
+    cfg = tmp_path / "personal.yaml"
+    cfg.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(dash, "_resolve_config_file", lambda: cfg)
+
+    async def go():
+        store = MessengerStore(StateManager(str(mclient.db_path)))
+        await store.state.init_db()
+        tg = await store.thread_for("telegram", "manual", "telegram:acme_studio")
+        vk = await store.thread_for("vk", "manual", "vk:acme_studio")
+        return (await store.add_outbound(tg["id"], "От 2 900 ₽.", "pending_review"),
+                await store.add_outbound(vk["id"], "От 2 900 ₽.", "pending_review"))
+    tg_msg, vk_msg = asyncio.run(go())
+    assert mclient.post(f"/api/messengers/messages/{tg_msg}/approve").json()["success"]
+    assert q(mclient.db_path, "SELECT status, approved_by FROM messenger_messages WHERE id = ?",
+             (tg_msg,)) == [("approved", "you")]
+    # VK has no web client here: that one is still copied by hand
+    assert mclient.post(f"/api/messengers/messages/{vk_msg}/approve").status_code == 409
+
+
+def _personal_cfg(monkeypatch, tmp_path, on=True):
+    data = yaml.safe_load((PROJECT_ROOT / "harvey.yaml").read_text(encoding="utf-8"))
+    data["channels"]["messengers"] = {"enabled": True,
+                                      "personal": {"enabled": on, "confirm_risk": on}}
+    cfg = tmp_path / "personal.yaml"
+    cfg.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(dash, "_resolve_config_file", lambda: cfg)
+
+
+def _threads(db_path):
+    async def go():
+        store = MessengerStore(StateManager(str(db_path)))
+        await store.state.init_db()
+        tg = await store.thread_for("telegram", "manual", "telegram:acme_studio")
+        vk = await store.thread_for("vk", "manual", "vk:acme_studio")
+        bot = await store.thread_for("telegram", "bot", "501")
+        closed = await store.thread_for("whatsapp", "manual", "whatsapp:79990001122")
+        await store.set_thread(closed["id"], status="closed")
+        return tg["id"], vk["id"], bot["id"], closed["id"]
+    return asyncio.run(go())
+
+
+def test_autopilot_needs_a_second_confirmation_and_only_fits_a_personal_chat(mclient, monkeypatch, tmp_path):
+    _personal_cfg(monkeypatch, tmp_path)
+    tg, vk, bot, closed = _threads(mclient.db_path)
+    url = "/api/messengers/threads/{}/autopilot"
+    flag = lambda t: q(mclient.db_path, "SELECT autopilot FROM messenger_threads WHERE id = ?", (t,))
+    # one press is not enough, whatever the payload says short of an explicit confirm
+    assert mclient.post(url.format(tg), json={"on": True}).status_code == 400
+    assert mclient.post(url.format(tg), json={"on": True, "confirm": "yes"}).status_code == 400
+    assert flag(tg) == [(0,)]
+    assert mclient.post(url.format(tg), json={"on": True, "confirm": True}).json()["success"]
+    assert flag(tg) == [(1,)]
+    # not a bot chat, not VK, not a closed conversation
+    for other in (vk, bot, closed):
+        assert mclient.post(url.format(other), json={"on": True, "confirm": True}).status_code == 409
+        assert flag(other) == [(0,)]
+    # off is one call and needs no confirmation
+    assert mclient.post(url.format(tg), json={"on": False}).json()["success"]
+    assert flag(tg) == [(0,)]
+
+
+def test_autopilot_cannot_be_switched_on_while_personal_sending_is_off(mclient, monkeypatch, tmp_path):
+    _personal_cfg(monkeypatch, tmp_path, on=False)
+    tg, *_ = _threads(mclient.db_path)
+    r = mclient.post(f"/api/messengers/threads/{tg}/autopilot", json={"on": True, "confirm": True})
+    assert r.status_code == 409
+    assert q(mclient.db_path, "SELECT autopilot FROM messenger_threads WHERE id = ?", (tg,)) == [(0,)]
 
 
 def test_marking_a_conversation_do_not_write_stops_everything(mclient):

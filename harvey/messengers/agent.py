@@ -20,7 +20,7 @@ from harvey.messengers import gate
 from harvey.messengers.bots import NO_TEXT, WhatsAppCloud, configured_bots
 from harvey.messengers.contacts import CHANNEL_LABELS, SIGNAL_FOR
 from harvey.messengers.personal import PERSONAL_CHANNELS, PersonalClient, REACHABLE, UNKNOWN
-from harvey.messengers.store import COLD_OPEN, MessengerStore, _now, _ts
+from harvey.messengers.store import AUTOPILOT_PERSONAL, BROWSER_SENT, COLD_OPEN, MessengerStore, _now, _ts
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
 logger = logging.getLogger("harvey.messengers")
@@ -93,6 +93,7 @@ class MessengerAgent:
                            ("drafted", self.draft_first_messages),
                            ("checked", self.check_personal_availability),
                            ("personal_sent", self.send_approved_personal),
+                           ("personal_replied", self.send_approved_personal_replies),
                            ("personal_replies", self.read_personal_replies)):
             try:
                 report[name] = await step()
@@ -176,6 +177,7 @@ class MessengerAgent:
 
     async def _stop(self, thread, status: str, reason: str, intent: str = "") -> None:
         await self.store.set_thread(thread["id"], status=status, status_reason=reason,
+                                    autopilot=0,   # any stop ends an experimental autopilot
                                     **({"intent": intent} if intent else {}))
         await self.store.cancel_outbound(thread["id"])
         if status in ("opted_out", "closed"):
@@ -236,10 +238,21 @@ class MessengerAgent:
         blocked = gate.problems(reply, self.config, kind="reply", company_domain=domain)
         held = gate.holds(reply, self.config, company_domain=domain)
         autopilot = not self.cfg.require_approval and thread["transport"] == "bot"
+        personal_auto = self._personal_autopilot_on(thread)
         if blocked:
             status, by, err = "held", "", "; ".join(blocked)
-        elif autopilot and held:
+        elif (autopilot or personal_auto) and held:
             status, by, err = "held", "", "; ".join(held)
+        elif personal_auto and (await self.store.autopilot_answers(thread["id"])
+                                >= self.cfg.personal.autopilot_max_replies):
+            # The cap is spent: back to asking you, and the switch goes off so
+            # the dashboard shows it.
+            await self.store.set_autopilot(thread["id"], False)
+            status, by, err = "pending_review", "", (
+                f"автопилот сделал {self.cfg.personal.autopilot_max_replies} ответов и остановился: "
+                "дальше только с вашего одобрения")
+        elif personal_auto:
+            status, by, err = "approved", AUTOPILOT_PERSONAL, ""
         elif autopilot:
             status, by, err = "approved", "autopilot", ""
         else:
@@ -249,6 +262,14 @@ class MessengerAgent:
                                     stage=self._next_stage(intent, thread.get("stage", "")))
         await self.store.mark_inbound_handled(thread["id"])
         return 1
+
+    def _personal_autopilot_on(self, thread) -> bool:
+        """The experimental autopilot applies only to a conversation you
+        switched on, in your own account, while personal sending is on."""
+        pcfg = self.cfg.personal
+        return bool(thread.get("autopilot") and thread["transport"] == "manual"
+                    and thread["channel"] in PERSONAL_CHANNELS
+                    and pcfg.enabled and pcfg.confirm_risk)
 
     @staticmethod
     def _next_stage(intent: str, stage: str) -> str:
@@ -538,7 +559,10 @@ class MessengerAgent:
                 # queue, so an unconfirmed send is never retried forever
                 # (the first attempt may have gone through after all).
                 await self.store.personal_send_failed(
-                    item["id"], result["error"], max_attempts=pcfg.max_send_attempts)
+                    item["id"], result["error"],
+                    # Pressed but not seen in the chat: it may have gone, so
+                    # no second try at all.
+                    max_attempts=1 if result.get("unconfirmed") else pcfg.max_send_attempts)
                 continue
             thread = await self.store.thread_for(
                 item["channel"], "manual", f"{item['channel']}:{item['handle']}",
@@ -552,6 +576,59 @@ class MessengerAgent:
                 sent += 1
                 await self.state.log_action("messenger_personal_sent", "messengers",
                                             {"item": item["id"], "channel": item["channel"]})
+        return sent
+
+    async def send_approved_personal_replies(self) -> int:
+        """Answers you approved in a conversation held in your own account go
+        out through the browser, the same way an approved first message does:
+        only the exact approved text, only inside your active hours, inside
+        the day's send cap (shared with first messages), never while sending
+        is paused, and never to a thread that opted out. A failed send is
+        marked failed and left for you to approve again: a blind retry could
+        type the same answer twice."""
+        pcfg = self.cfg.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return 0
+        if await self.state.get_setting("sending_paused"):
+            return 0
+        sent = 0
+        for msg in await self.store.approved_personal_replies(limit=5):
+            used = (await self.store.personal_sent_since(_utc_midnight())
+                    + await self.store.browser_replies_since(_utc_midnight()))
+            if used >= pcfg.max_sends_per_day:
+                break
+            if msg["thread_status"] in ("opted_out", "closed"):
+                await self.store.reject_message(msg["id"])
+                continue
+            domain = await self._company_domain(msg.get("company_id", ""))
+            blocked = gate.problems(msg["body"], self.config, kind="reply", company_domain=domain)
+            if blocked:
+                await self.store.mark_message_failed(msg["id"], "; ".join(blocked))
+                continue
+            client = await self._personal_client(msg["channel"])
+            if client is None:
+                continue   # no login for this channel; it waits, still approved
+            if not client._within_hours():
+                continue   # outside your hours: it waits, still approved
+            result = await client.send_first_message(msg["handle"], msg["body"])
+            if not result["ok"]:
+                if client.blocked_reason:
+                    continue   # logged out: nothing was tried, it waits
+                await self.store.mark_message_failed(msg["id"], result["error"])
+                continue
+            try:
+                await self.store.mark_message_sent(msg["id"], f"{BROWSER_SENT}:{msg['id']}")
+            except Exception as e:
+                # The text is already in the chat: whatever happens to the
+                # record, this message must never be typed in a second time.
+                logger.error(f"Messengers: a personal answer went out but wasn't recorded: "
+                             f"{type(e).__name__}")
+                await self.store.mark_message_failed(
+                    msg["id"], "отправлено, но не записано: проверьте чат, повторно не отправится")
+                continue
+            sent += 1
+            await self.state.log_action("messenger_personal_reply_sent", "messengers",
+                                        {"thread": msg["thread_id"], "channel": msg["channel"]})
         return sent
 
     async def _browser_visits_today(self) -> int:
@@ -603,12 +680,13 @@ class MessengerAgent:
                 continue   # no login for this channel; other channels carry on
             own = await self.store._rows(
                 """SELECT body FROM messenger_messages WHERE thread_id = ? AND direction = 'out'
-                   ORDER BY created_at DESC, rowid DESC LIMIT 1""", (row["thread_id"],))
+                   AND status = 'sent' ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (row["thread_id"],))
             for text in await client.read_reply(row["handle"], own[0]["body"] if own else ""):
                 # No provider id here, so the unique stamp can't stop a
                 # repeat: the same text is never re-stored while it still
                 # sits unhandled, and once handled not until our newest
-                # outgoing message — anything older than that is history on
+                # sent message (an unsent draft doesn't count) — anything older than that is history on
                 # the page, not a new reply. Without this bound the same
                 # "Нет, спасибо" would be stored again every cycle after the
                 # first answer, spending the model's budget on one message.
@@ -616,7 +694,8 @@ class MessengerAgent:
                     """SELECT 1 FROM messenger_messages WHERE thread_id = ? AND direction = 'in'
                        AND body = ? AND (status = 'received'
                             OR created_at > COALESCE((SELECT MAX(created_at) FROM messenger_messages
-                                                      WHERE thread_id = ? AND direction = 'out'), ''))
+                                                      WHERE thread_id = ? AND direction = 'out'
+                                                        AND status = 'sent'), ''))
                        LIMIT 1""",
                     (row["thread_id"], text, row["thread_id"]))
                 if dup:

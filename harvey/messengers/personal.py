@@ -223,6 +223,53 @@ def chat_url(channel: str, handle: str) -> str:
     return ""
 
 
+# How a send ended. NOT_SENT: nothing was pressed (safe to try again).
+# UNCONFIRMED: send was pressed but the chat doesn't show the message; it may
+# have gone, so it is never retried on its own.
+SENT, NOT_SENT, UNCONFIRMED = "sent", "not_sent", "unconfirmed"
+# How much of the message must show up in the chat to count as delivered.
+SNIPPET_CHARS = 40
+CONFIRM_POLL_SECONDS = 0.5
+
+
+def _squash(s: str) -> str:
+    return " ".join((s or "").lower().split())
+
+
+def _count(haystack: str, needle: str) -> int:
+    return _squash(haystack).count(needle) if needle else 0
+
+
+def snippet_of(message: str) -> str:
+    """The start of the message as the web client will render it."""
+    return _squash(message)[:SNIPPET_CHARS]
+
+
+def message_delivered(snippet: str, body_before: str, box_before: str,
+                      body_after: str, box_after: str) -> bool:
+    """The message is in the chat when its text left the input box and the
+    page shows one more copy of it outside the box than before. Counting
+    (not just finding the text) keeps an earlier identical message in the
+    chat from passing for this one."""
+    if not snippet or _count(box_after, snippet):
+        return False
+    base = _count(body_before, snippet) - _count(box_before, snippet)
+    return _count(body_after, snippet) - _count(box_after, snippet) >= base + 1
+
+
+async def _box_text(box) -> str | None:
+    """What the input box holds now, None if it can't be read."""
+    for name in ("input_value", "inner_text"):
+        fn = getattr(box, name, None)
+        if fn is None:
+            continue
+        try:
+            return str(await fn() or "")
+        except Exception:
+            continue
+    return None
+
+
 # ── The browser behind a small interface, so tests need no browser ──
 
 class BrowserSession:
@@ -281,34 +328,61 @@ class BrowserSession:
                 pass
 
     async def send_message(self, url: str, text: str,
-                           timeout_ms: int = CHAT_TIMEOUT_MS) -> bool:
-        """Open the chat, type ``text`` into its box and press send."""
+                           timeout_ms: int = CHAT_TIMEOUT_MS) -> str:
+        """Open the chat, type ``text`` into its box and press send. Returns
+        SENT only when the chat then shows the message; NOT_SENT when nothing
+        was pressed; UNCONFIRMED when send was pressed but the message can't
+        be seen in the chat."""
         ctx = self._ctx or await self.start()
         input_sel, send_sel = ((TELEGRAM_INPUT_SELECTOR, TELEGRAM_SEND_SELECTOR)
                                if self.channel == "telegram"
                                else (WHATSAPP_INPUT_SELECTOR, WHATSAPP_SEND_SELECTOR))
         page = await ctx.new_page()
+        pressed = False
         try:
             await page.goto(url, timeout=45_000, wait_until="domcontentloaded")
             box = await page.wait_for_selector(input_sel, timeout=timeout_ms)
             if box is None:
-                return False
+                return NOT_SENT
             await box.click()
             await box.fill(text)
+            snippet = snippet_of(text)
+            box_before = await _box_text(box)
+            if box_before is None or snippet not in _squash(box_before):
+                return NOT_SENT   # the text didn't land in the box: nothing to send
+            body_before = await page.inner_text("body")
             button = await page.wait_for_selector(send_sel, timeout=timeout_ms)
             if button is None:
-                return False
+                return NOT_SENT
             await button.click()
-            await asyncio.sleep(1.0)
-            return True
+            pressed = True
+            return await self._confirm_sent(page, box, input_sel, snippet,
+                                            body_before, box_before, timeout_ms)
         except Exception as e:
             logger.warning(f"Personal {self.channel}: send failed on the page: {type(e).__name__}")
-            return False
+            return UNCONFIRMED if pressed else NOT_SENT
         finally:
             try:
                 await page.close()
             except Exception:
                 pass
+
+    async def _confirm_sent(self, page, box, input_sel, snippet, body_before,
+                            box_before, timeout_ms) -> str:
+        deadline = _now() + timedelta(milliseconds=max(timeout_ms, 0))
+        while True:
+            try:
+                live = await page.query_selector(input_sel) or box
+                box_after = await _box_text(live)
+                if box_after is not None and message_delivered(
+                        snippet, body_before, box_before,
+                        await page.inner_text("body"), box_after):
+                    return SENT
+            except Exception:
+                pass
+            if _now() >= deadline:
+                return UNCONFIRMED
+            await asyncio.sleep(CONFIRM_POLL_SECONDS)
 
     async def qr_login(self, timeout_s: int = 240) -> bool:
         """Show the login QR in the terminal until it is scanned."""
@@ -431,14 +505,24 @@ class PersonalClient:
         if not url:
             return {"ok": False, "error": "no chat link for this contact"}
         try:
-            sent = await self.session.send_message(url, body)
+            outcome = await self.session.send_message(url, body)
         except Exception as e:
             logger.warning(f"Personal {self.channel}: send failed: {type(e).__name__}")
-            sent = False
+            outcome = NOT_SENT
+        # A session may still answer with a plain bool (True: it went).
+        if outcome is True:
+            outcome = SENT
+        elif outcome is False or outcome is None:
+            outcome = NOT_SENT
         await self._sleep_between_actions()
-        if not sent:
-            return {"ok": False, "error": "the message didn't go: the chat or the input wasn't there"}
-        return {"ok": True, "error": ""}
+        if outcome == SENT:
+            return {"ok": True, "error": "", "unconfirmed": False}
+        if outcome == UNCONFIRMED:
+            return {"ok": False, "unconfirmed": True,
+                    "error": "кнопку «отправить» нажали, но сообщения в чате не видно: "
+                             "проверьте чат, повторно оно не отправится"}
+        return {"ok": False, "unconfirmed": False,
+                "error": "the message didn't go: the chat or the input wasn't there"}
 
     async def read_reply(self, chat_ref: str, own_body: str) -> list[str]:
         """What they wrote back after our last sent message, oldest first.

@@ -20,7 +20,9 @@ from harvey.messengers.agent import MessengerAgent
 from harvey.messengers.contacts import normalize_phone
 from harvey.messengers.personal import (
     REACHABLE, UNKNOWN, UNREACHABLE, AvailabilityResult, BrowserSession,
-    MessengerLoginError, PersonalClient, chat_url, is_bot_handle, login,
+    NOT_SENT, SENT, TELEGRAM_INPUT_SELECTOR, TELEGRAM_SEND_SELECTOR, UNCONFIRMED,
+    MessengerLoginError, PersonalClient, chat_url, is_bot_handle, login, message_delivered,
+    snippet_of,
     parse_inbound_telegram, parse_inbound_whatsapp, parse_telegram_page,
     parse_whatsapp_page)
 from harvey.messengers.store import MessengerStore
@@ -512,18 +514,26 @@ async def test_give_up_after_the_last_attempt_cancels_the_followup(state):
 # ── The browser behind the interface: driven with a fake page, no real browser ──
 
 class FakeElement:
-    def __init__(self, box=None):
+    def __init__(self, box=None, on_click=None, types=True):
         self.box = box
         self.clicked, self.filled = False, None
+        self.text, self.on_click, self.types = "", on_click, types
 
     async def bounding_box(self):
         return self.box
 
     async def click(self):
         self.clicked = True
+        if self.on_click:
+            self.on_click()
 
     async def fill(self, text):
         self.filled = text
+        if self.types:
+            self.text = text
+
+    async def input_value(self):
+        return self.text
 
 
 class FakePage:
@@ -562,6 +572,32 @@ class FakePage:
 
     async def close(self):
         self.closed = True
+
+
+class ChatPage(FakePage):
+    """A web chat: what you type shows in the input box (and so on the page);
+    Send moves it into the chat history, unless ``deliver`` is off."""
+
+    def __init__(self, deliver=True, clear=True, history="", types=True):
+        super().__init__()
+        self.history, self.deliver, self.clear = history, deliver, clear
+        self.box = FakeElement(types=types)
+        self.button = FakeElement(on_click=self._send)
+        self.selectors = {TELEGRAM_INPUT_SELECTOR: self.box, TELEGRAM_SEND_SELECTOR: self.button}
+
+    @property
+    def body(self):
+        return f"{self.history}\n{self.box.text}"
+
+    @body.setter
+    def body(self, value):
+        pass
+
+    def _send(self):
+        if self.deliver:
+            self.history += "\n" + self.box.text
+        if self.clear:
+            self.box.text = ""
 
 
 class FakeContext:
@@ -607,19 +643,17 @@ async def test_read_chat_survives_a_never_idle_network():
 
 @pytest.mark.asyncio
 async def test_send_message_types_into_the_box_and_presses_send():
-    box, button = FakeElement(), FakeElement()
-    page = FakePage(selectors={"div[aria-label='Message'], .input-field textarea": box,
-                               "button[aria-label='Send'], .send-button-icon": button})
+    page = ChatPage()
     s = make_session(page)
-    assert await s.send_message("https://start", "текст", timeout_ms=0)
-    assert box.filled == "текст" and button.clicked
+    assert await s.send_message("https://start", "текст", timeout_ms=0) == SENT
+    assert page.box.filled == "текст" and page.button.clicked
     assert page.closed
 
 
 @pytest.mark.asyncio
 async def test_send_without_an_input_box_is_a_clean_false():
     s = make_session(FakePage(selectors={}))   # the redesigned page: no box found
-    assert not await s.send_message("u", "текст", timeout_ms=0)
+    assert await s.send_message("u", "текст", timeout_ms=0) == NOT_SENT
 
 
 @pytest.mark.asyncio
@@ -629,7 +663,7 @@ async def test_send_when_the_page_throws_is_a_false_not_a_crash():
             raise RuntimeError("navigation failed")
 
     s = make_session(Exploding())
-    assert not await s.send_message("u", "текст", timeout_ms=0)
+    assert await s.send_message("u", "текст", timeout_ms=0) == NOT_SENT
 
 
 @pytest.mark.asyncio
@@ -725,3 +759,394 @@ async def test_login_stops_only_the_session_it_started():
     s.qr_login = lambda *a, **k: borrowed.qr_login()
     assert not await login("telegram", session=s)
     # the real BrowserSession we injected was created by us, so it is stopped
+
+
+# ── Approved answers in a conversation held in your own account ──
+
+PCFG_CLOSED = SimpleNamespace(enabled=True, confirm_risk=True, active_hours=("00:00", "00:00"),
+                              action_gap_seconds=(0.0, 0.0))
+
+
+async def _approved_reply(state, body="От 2 900 ₽ в месяц. Подходит?", status="approved",
+                          thread_status="open", handle="@ivan"):
+    store = MessengerStore(state)
+    cid = await state.add_company(Company(name="Acme Studio", domain="acme.example",
+                                          website="https://acme.example"))
+    thread = await store.thread_for("telegram", "manual", f"telegram:{handle}",
+                                    handle=handle, company_id=cid)
+    if thread_status != "open":
+        await store.set_thread(thread["id"], status=thread_status)
+    mid = await store.add_outbound(thread["id"], body, status, approved_by="you")
+    return store, thread["id"], mid
+
+
+def _reply_agent(state, session, pcfg=PCFG_ON, config=None):
+    return _fake_agent(state, {"telegram": PersonalClient("telegram", session, pcfg, pacing=False)},
+                       config)
+
+
+def _msg(state, mid):
+    return rows_of(state, f"SELECT status || '|' || provider_msg_id || '|' || error "
+                          f"FROM messenger_messages WHERE id = '{mid}'")[0]
+
+
+@pytest.mark.asyncio
+async def test_an_approved_reply_is_typed_in_once_and_marked_as_browser_sent(state):
+    store, _, mid = await _approved_reply(state)
+    s = FakeSession(send_ok=True)
+    a = _reply_agent(state, s)
+    assert await a.send_approved_personal_replies() == 1
+    assert [t for _, t in s.sends] == ["От 2 900 ₽ в месяц. Подходит?"]
+    assert s.sends[0][0].startswith("https://web.telegram.org/")
+    assert _msg(state, mid) == f"sent|browser:{mid}|"
+    assert await a.send_approved_personal_replies() == 0      # nothing goes twice
+    assert len(s.sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_draft_nobody_approved_is_never_typed_in(state):
+    await _approved_reply(state, status="pending_review")
+    s = FakeSession()
+    assert await _reply_agent(state, s).send_approved_personal_replies() == 0
+    assert s.sends == []
+
+
+@pytest.mark.asyncio
+async def test_replies_wait_when_personal_sending_is_off_or_paused_or_after_hours(state):
+    _, _, mid = await _approved_reply(state)
+    s = FakeSession()
+    off = make_config({"enabled": False})
+    assert await _reply_agent(state, s, config=off).send_approved_personal_replies() == 0
+    assert await _reply_agent(state, s, pcfg=PCFG_CLOSED).send_approved_personal_replies() == 0
+    await state.set_setting("sending_paused", "1")
+    assert await _reply_agent(state, s).send_approved_personal_replies() == 0
+    assert s.sends == [] and _msg(state, mid).startswith("approved|")   # still waiting, not failed
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_someone_who_opted_out_is_dropped(state):
+    _, _, mid = await _approved_reply(state, thread_status="opted_out")
+    s = FakeSession()
+    assert await _reply_agent(state, s).send_approved_personal_replies() == 0
+    assert s.sends == [] and _msg(state, mid).startswith("rejected|")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_breaks_the_rules_is_failed_with_the_reason(state):
+    _, _, mid = await _approved_reply(state, body="а" * 1200)
+    s = FakeSession()
+    assert await _reply_agent(state, s).send_approved_personal_replies() == 0
+    status, _, error = _msg(state, mid).split("|", 2)
+    assert s.sends == [] and status == "failed" and "longer than" in error
+
+
+@pytest.mark.asyncio
+async def test_a_failed_browser_send_is_not_retried_blindly(state):
+    store, _, mid = await _approved_reply(state)
+    s = FakeSession(send_ok=False)
+    a = _reply_agent(state, s)
+    assert await a.send_approved_personal_replies() == 0
+    assert _msg(state, mid).startswith("failed|")
+    assert await a.send_approved_personal_replies() == 0
+    assert len(s.sends) == 1                                  # one try, then it waits for you
+    assert await store.approve_message(mid)                   # approving again is your call
+
+
+@pytest.mark.asyncio
+async def test_replies_share_the_daily_send_cap_with_first_messages(state):
+    await _approved_reply(state, body="Первый ответ.", handle="@one")
+    await _approved_reply(state, body="Второй ответ.", handle="@two")
+    s = FakeSession(send_ok=True)
+    cfg = make_config({"max_sends_per_day": 1})
+    a = _reply_agent(state, s, config=cfg)
+    assert await a.send_approved_personal_replies() == 1
+    assert await a.send_approved_personal_replies() == 0
+    assert len(s.sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_hand_copied_answer_does_not_count_against_the_cap(state):
+    store, _, mid = await _approved_reply(state, status="pending_review")
+    await store.mark_message_sent(mid)                        # "Скопировать и отметить": no browser
+    assert await store.browser_replies_since(datetime(2000, 1, 1)) == 0
+
+
+@pytest.mark.asyncio
+async def test_replies_are_still_read_while_an_answer_waits_for_approval(state):
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    s = FakeSession(send_ok=True)
+    a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)})
+    assert await a.send_approved_personal() == 1
+    thread_id = (await store.get_cold(oid))["thread_id"]
+    # an unsent draft of ours is now the newest outgoing message of the thread
+    await store.add_outbound(thread_id, "Черновик, которого нет в чате.", "pending_review")
+    s.text = TG_PAGE.replace("А сколько стоит?", "Нет, спасибо")
+    assert await a.read_personal_replies() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_handled_question_is_not_read_again_while_its_answer_waits(state):
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    s = FakeSession(send_ok=True)
+    a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)})
+    assert await a.send_approved_personal() == 1
+    thread_id = (await store.get_cold(oid))["thread_id"]
+    # timestamps have one-second resolution: put our message a minute back
+    await store._run("UPDATE messenger_messages SET created_at = '2000-01-01 00:00:00' "
+                     "WHERE direction = 'out'")
+    s.text = TG_PAGE                                          # they asked "А сколько стоит?"
+    assert await a.read_personal_replies() == 1
+    await store.mark_inbound_handled(thread_id)               # the model answered it ...
+    await store.add_outbound(thread_id, "От 2 900 ₽.", "pending_review")   # ... a draft waits
+    assert await a.read_personal_replies() == 0               # the same question is not new
+    msgs = await store._rows("SELECT body FROM messenger_messages WHERE thread_id = ? "
+                             "AND direction = 'in'", (thread_id,))
+    assert len(msgs) == 1
+
+
+# ── Experimental autopilot for one conversation in your own account ──
+
+from tests.test_messengers_agent import FakeBrain  # noqa: E402
+
+
+async def _auto_thread(state, autopilot=True, channel="telegram"):
+    store = MessengerStore(state)
+    cid = await state.add_company(Company(name="Acme Studio", domain="acme.example",
+                                          website="https://acme.example"))
+    thread = await store.thread_for(channel, "manual", f"{channel}:@ivan", handle="@ivan",
+                                    company_id=cid)
+    if autopilot:
+        await store.set_autopilot(thread["id"], True)
+    return store, thread["id"]
+
+
+def _auto_agent(state, brain, session, config=None):
+    a = MessengerAgent(brain, state, config or make_config(), EnvConfig())
+    a.send_pacing = False
+    a.personal_clients = {"telegram": PersonalClient("telegram", session, PCFG_ON, pacing=False)}
+    return a
+
+
+def _answer_script(*replies):
+    return FakeBrain(*[{"intent": "question", "reply": r} for r in replies])
+
+
+@pytest.mark.asyncio
+async def test_autopilot_answers_and_sends_without_asking(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "А сколько стоит?")
+    s = FakeSession(send_ok=True)
+    report = await _auto_agent(state, _answer_script("От 2 900 ₽ в месяц. Подходит?"), s).run()
+    assert report["answered"] == 1 and report["personal_replied"] == 1
+    assert [t for _, t in s.sends] == ["От 2 900 ₽ в месяц. Подходит?"]
+    assert rows_of(state, "SELECT approved_by FROM messenger_messages "
+                          "WHERE direction = 'out'") == ["autopilot-personal"]
+
+
+@pytest.mark.asyncio
+async def test_without_autopilot_the_same_answer_waits_for_you(state):
+    store, tid = await _auto_thread(state, autopilot=False)
+    await store.add_inbound(tid, "А сколько стоит?")
+    s = FakeSession(send_ok=True)
+    await _auto_agent(state, _answer_script("От 2 900 ₽ в месяц. Подходит?"), s).run()
+    assert s.sends == []
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out'") == [
+        "pending_review"]
+
+
+@pytest.mark.asyncio
+async def test_autopilot_is_ignored_when_personal_sending_is_off(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "А сколько стоит?")
+    s = FakeSession(send_ok=True)
+    off = make_config({"enabled": False})
+    await _auto_agent(state, _answer_script("От 2 900 ₽ в месяц."), s, off).run()
+    assert s.sends == []
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out'") == [
+        "pending_review"]
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stops_at_its_cap_and_goes_back_to_asking(state):
+    store, tid = await _auto_thread(state)
+    s = FakeSession(send_ok=True)
+    a = _auto_agent(state, _answer_script("Ответ раз.", "Ответ два.", "Ответ три."), s,
+                    make_config({"autopilot_max_replies": 2}))
+    for n in (1, 2, 3):
+        await store.add_inbound(tid, f"Вопрос {n}")
+        await a.run()
+    assert [t for _, t in s.sends] == ["Ответ раз.", "Ответ два."]
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out' "
+                          "ORDER BY rowid DESC LIMIT 1") == ["pending_review"]
+    assert rows_of(state, "SELECT autopilot FROM messenger_threads") == [0]
+
+
+@pytest.mark.asyncio
+async def test_autopilot_holds_an_answer_with_a_foreign_link(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "Где почитать?")
+    s = FakeSession(send_ok=True)
+    await _auto_agent(state, _answer_script("Вот тут: https://evil.example/promo"), s).run()
+    assert s.sends == []
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out'") == ["held"]
+
+
+@pytest.mark.asyncio
+async def test_an_opt_out_ends_autopilot_and_nothing_is_sent(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "Нет, спасибо, не пишите мне")
+    s = FakeSession(send_ok=True)
+    await _auto_agent(state, _answer_script("Понял, а можно ещё?"), s).run()
+    assert s.sends == []
+    assert rows_of(state, "SELECT status || '|' || autopilot FROM messenger_threads") == ["opted_out|0"]
+
+
+@pytest.mark.asyncio
+async def test_a_complaint_hands_the_conversation_to_you_and_ends_autopilot(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "Я напишу жалобу в Роскомнадзор")
+    s = FakeSession(send_ok=True)
+    await _auto_agent(state, _answer_script("Давайте обсудим."), s).run()
+    assert s.sends == []
+    assert rows_of(state, "SELECT status || '|' || autopilot FROM messenger_threads") == ["needs_human|0"]
+
+
+@pytest.mark.asyncio
+async def test_switching_autopilot_off_returns_an_unsent_answer_to_you(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "А сколько стоит?")
+    s = FakeSession(send_ok=True)
+    a = _auto_agent(state, _answer_script("От 2 900 ₽ в месяц."), s)
+    a.send_approved_personal_replies = _no_send      # it is approved but hasn't gone yet
+    await a.run()
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out'") == ["approved"]
+    await store.set_autopilot(tid, False)
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out'") == [
+        "pending_review"]
+    assert s.sends == []
+
+
+async def _no_send():
+    return 0
+
+
+@pytest.mark.asyncio
+async def test_approval_mode_does_not_pull_personal_autopilot_answers_back(state):
+    store, tid = await _auto_thread(state)
+    await store.add_inbound(tid, "А сколько стоит?")
+    s = FakeSession(send_ok=True)
+    a = _auto_agent(state, _answer_script("От 2 900 ₽ в месяц."), s)
+    a.send_approved_personal_replies = _no_send
+    await a.run()
+    assert a.cfg.require_approval                     # the shipped default
+    await a.run()                                     # requeue_autopilot runs each pass
+    assert rows_of(state, "SELECT status FROM messenger_messages WHERE direction = 'out'") == ["approved"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_went_out_is_never_typed_in_twice_even_if_recording_fails(state, monkeypatch):
+    store, _, mid = await _approved_reply(state)
+    s = FakeSession(send_ok=True)
+    a = _reply_agent(state, s)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(a.store, "mark_message_sent", boom)
+    assert await a.send_approved_personal_replies() == 0
+    assert await a.send_approved_personal_replies() == 0
+    assert len(s.sends) == 1
+    assert _msg(state, mid).startswith("failed|")
+
+
+# ── Did the message really reach the chat? ──
+
+MSG = "Здравствуйте! Заметил, что запись у вас идёт только по телефону. Как с этим?"
+
+
+def test_delivery_means_the_text_left_the_box_and_one_more_copy_is_in_the_chat():
+    snip = snippet_of(MSG)
+    before = f"старое сообщение\n{MSG}"                       # typed, still in the box
+    assert message_delivered(snip, before, MSG, f"старое сообщение\n{MSG}\n", "")
+    assert not message_delivered(snip, before, MSG, before, MSG)        # still in the box
+    assert not message_delivered(snip, before, MSG, "старое сообщение", "")   # gone, not shown
+    assert not message_delivered("", before, MSG, before, "")           # nothing to look for
+
+
+def test_an_earlier_identical_message_is_not_taken_for_the_new_one():
+    snip = snippet_of(MSG)
+    body_before = f"{MSG}\n{MSG}"          # an old bubble plus the draft in the box
+    assert not message_delivered(snip, body_before, MSG, MSG, "")        # box cleared, nothing new
+    assert message_delivered(snip, body_before, MSG, f"{MSG}\n{MSG}", "")
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_shows_up_in_the_chat_is_confirmed():
+    page = ChatPage()
+    assert await make_session(page).send_message("u", MSG, timeout_ms=0) == SENT
+
+
+@pytest.mark.asyncio
+async def test_text_that_never_landed_in_the_box_is_not_sent_and_send_is_not_pressed():
+    page = ChatPage(types=False)
+    assert await make_session(page).send_message("u", MSG, timeout_ms=0) == NOT_SENT
+    assert not page.button.clicked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{"deliver": False, "clear": False},   # the click did nothing
+                                {"deliver": False, "clear": True}])   # the box emptied, no bubble
+async def test_pressed_but_not_visible_is_unconfirmed(kw):
+    page = ChatPage(**kw)
+    assert await make_session(page).send_message("u", MSG, timeout_ms=0) == UNCONFIRMED
+    assert page.button.clicked
+
+
+@pytest.mark.asyncio
+async def test_an_identical_earlier_message_does_not_confirm_a_send_that_failed():
+    assert await make_session(ChatPage(deliver=False, history=MSG)).send_message(
+        "u", MSG, timeout_ms=0) == UNCONFIRMED
+    assert await make_session(ChatPage(deliver=True, history=MSG)).send_message(
+        "u", MSG, timeout_ms=0) == SENT
+
+
+@pytest.mark.asyncio
+async def test_the_client_reports_unconfirmed_and_accepts_plain_bools():
+    c = PersonalClient("telegram", FakeSession(send_ok=UNCONFIRMED), PCFG_ON, pacing=False)
+    r = await c.send_first_message("@ivan", MSG)
+    assert r["ok"] is False and r["unconfirmed"] is True and "проверьте чат" in r["error"]
+    assert (await PersonalClient("telegram", FakeSession(send_ok=True), PCFG_ON,
+                                 pacing=False).send_first_message("@ivan", MSG))["ok"]
+    r = await PersonalClient("telegram", FakeSession(send_ok=False), PCFG_ON,
+                             pacing=False).send_first_message("@ivan", MSG)
+    assert r["ok"] is False and r["unconfirmed"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_first_message_leaves_the_queue_at_once_with_its_follow_up(state):
+    cid, oid = await _seed_draft(state, availability=REACHABLE)
+    store = MessengerStore(state)
+    await store.approve_cold(oid)
+    s = FakeSession(send_ok=UNCONFIRMED)
+    a = _fake_agent(state, {"telegram": PersonalClient("telegram", s, PCFG_ON, pacing=False)})
+    assert await a.send_approved_personal() == 0
+    assert await a.send_approved_personal() == 0
+    assert len(s.sends) == 1                                  # no second try: it may have gone
+    item = await store.get_cold(oid)
+    assert item["status"] == "cancelled" and "проверьте чат" in item["error"]
+    assert rows_of(state, "SELECT status FROM messenger_outbox WHERE step = 2") == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_answer_is_failed_with_a_note_and_not_retried(state):
+    store, _, mid = await _approved_reply(state)
+    s = FakeSession(send_ok=UNCONFIRMED)
+    a = _reply_agent(state, s)
+    assert await a.send_approved_personal_replies() == 0
+    assert await a.send_approved_personal_replies() == 0
+    assert len(s.sends) == 1
+    status, _, error = _msg(state, mid).split("|", 2)
+    assert status == "failed" and "проверьте чат" in error

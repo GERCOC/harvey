@@ -16,6 +16,15 @@ from harvey.messengers.contacts import CHANNEL_FOR, SIGNAL_FOR
 COLD_OPEN = ("waiting", "scheduled", "pending_review", "approved")
 # A thread in one of these gets nothing more from Harvey.
 THREAD_STOPPED = ("opted_out", "closed")
+# provider_msg_id prefix of an answer Harvey typed into your own account's
+# chat through the browser (a copy you sent by hand has none). The id is
+# "browser:<message id>": (thread, direction, provider_msg_id) is unique, so a
+# second answer in the same conversation needs its own value.
+BROWSER_SENT = "browser"
+# approved_by of an answer sent on a personal conversation's autopilot. Not
+# plain "autopilot": that one is the bots' and comes back to you when approval
+# is switched on again.
+AUTOPILOT_PERSONAL = "autopilot-personal"
 
 
 def _now() -> datetime:
@@ -511,6 +520,49 @@ class MessengerStore:
                ORDER BY m.created_at LIMIT ?""",
             (int(limit),))
 
+    async def approved_personal_replies(self, limit: int = 20) -> list[dict]:
+        """Approved answers in conversations held in your own account, oldest
+        first: Harvey types these into the chat through the browser."""
+        return await self._rows(
+            """SELECT m.*, t.channel, t.handle, t.company_id, t.status AS thread_status
+               FROM messenger_messages m JOIN messenger_threads t ON t.id = m.thread_id
+               WHERE m.direction = 'out' AND m.status = 'approved' AND t.transport = 'manual'
+                 AND t.channel IN ('telegram', 'whatsapp')
+               ORDER BY m.created_at LIMIT ?""",
+            (int(limit),))
+
+    async def set_autopilot(self, thread_id: str, on: bool) -> None:
+        """Switch one personal-account conversation to or from autopilot.
+        Switching off returns what autopilot approved and hasn't sent to you."""
+        await self.set_thread(thread_id, autopilot=1 if on else 0)
+        if not on:
+            await self._run(
+                """UPDATE messenger_messages SET status = 'pending_review', approved_by = '',
+                          updated_at = CURRENT_TIMESTAMP
+                   WHERE thread_id = ? AND direction = 'out' AND status = 'approved'
+                     AND approved_by = ?""",
+                (thread_id, AUTOPILOT_PERSONAL))
+
+    async def autopilot_answers(self, thread_id: str) -> int:
+        """Answers autopilot has approved in this conversation (sent or not)."""
+        rows = await self._rows(
+            """SELECT COUNT(*) AS n FROM messenger_messages
+               WHERE thread_id = ? AND direction = 'out' AND approved_by = ?
+                 AND status IN ('approved', 'sent')""",
+            (thread_id, AUTOPILOT_PERSONAL))
+        return rows[0]["n"] if rows else 0
+
+    async def browser_replies_since(self, since: datetime) -> int:
+        """Answers Harvey itself typed into your own account's chats since
+        ``since`` (marked with BROWSER_SENT); they share the day's send cap
+        with first messages."""
+        rows = await self._rows(
+            """SELECT COUNT(*) AS n FROM messenger_messages
+               WHERE direction = 'out' AND status = 'sent' AND provider_msg_id LIKE ?
+                 AND sent_at >= ?""",
+            (BROWSER_SENT + ":%", _ts(since)))
+        return rows[0]["n"] if rows else 0
+
     async def requeue_autopilot(self) -> int:
         """Approval switched back on: what autopilot approved and hasn't sent
         comes back to you."""
@@ -527,7 +579,7 @@ class MessengerStore:
             (thread_id,))
 
     async def set_thread(self, thread_id: str, **fields) -> None:
-        allowed = {"status", "status_reason", "intent", "stage", "company_id", "handle"}
+        allowed = {"status", "status_reason", "intent", "stage", "company_id", "handle", "autopilot"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
             return

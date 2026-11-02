@@ -215,6 +215,18 @@ class MessengerStore:
                 WHERE company_id = ? AND status IN ({ph})""",
             (company_id, *COLD_OPEN))
 
+    async def cancel_cold_for_handle(self, channel: str, handle: str) -> int:
+        """Every still-queued first message to this exact contact, stopped —
+        including one already approved for a personal send. A reply that
+        says no must beat the queue even before a thread links them."""
+        if not handle:
+            return 0
+        ph = ",".join("?" for _ in COLD_OPEN)
+        return await self._run(
+            f"""UPDATE messenger_outbox SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                WHERE channel = ? AND lower(handle) = lower(?) AND status IN ({ph})""",
+            (channel, handle, *COLD_OPEN))
+
     async def release_due(self) -> int:
         """Follow-ups whose day has come move to the queue."""
         return await self._run(

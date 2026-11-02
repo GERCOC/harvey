@@ -177,8 +177,13 @@ class MessengerAgent:
         await self.store.set_thread(thread["id"], status=status, status_reason=reason,
                                     **({"intent": intent} if intent else {}))
         await self.store.cancel_outbound(thread["id"])
-        if status in ("opted_out", "closed") and thread.get("company_id"):
-            await self.store.cancel_cold_for(thread["company_id"])
+        if status in ("opted_out", "closed"):
+            if thread.get("company_id"):
+                await self.store.cancel_cold_for(thread["company_id"])
+            # Also by handle: an approved personal send can exist before any
+            # thread links it to the business, and a "no" must beat that queue.
+            if thread.get("handle"):
+                await self.store.cancel_cold_for_handle(thread["channel"], thread["handle"])
         await self.store.mark_inbound_handled(thread["id"])
         await self.state.log_action(f"messenger_{status}", "messengers",
                                     {"thread": thread["id"], "channel": thread["channel"],
@@ -528,6 +533,38 @@ class MessengerAgent:
                 await self.state.log_action("messenger_personal_sent", "messengers",
                                             {"item": item["id"], "channel": item["channel"]})
         return sent
+
+    async def read_personal_replies(self) -> int:
+        """Read what they answered in chats Harvey itself opened from your
+        account. The replies land in the same threads as bot messages, so
+        ``answer_threads`` sees an opt-out and stops the sequence before
+        anything else is drafted for that business."""
+        pcfg = self.cfg.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return 0
+        stored = 0
+        rows = await self.store._rows(
+            """SELECT m.id AS item_id, m.channel, m.handle, m.thread_id, c.body
+               FROM messenger_outbox m JOIN messenger_messages c ON c.thread_id = m.thread_id
+               WHERE m.step = 1 AND m.status = 'sent' AND m.channel IN ('telegram','whatsapp')
+                 AND c.direction = 'out'
+               ORDER BY c.created_at DESC LIMIT 20""")
+        seen: set[str] = set()
+        for row in rows:
+            key = f"{row['channel']}:{row['handle']}"
+            if key in seen or not row["thread_id"]:
+                continue
+            seen.add(key)
+            client = await self._personal_client(row["channel"])
+            if client is None:
+                continue   # no login for this channel; other channels carry on
+            own = await self.store._rows(
+                """SELECT body FROM messenger_messages WHERE thread_id = ? AND direction = 'out'
+                   ORDER BY created_at DESC, rowid DESC LIMIT 1""", (row["thread_id"],))
+            for text in await client.read_reply(row["handle"], own[0]["body"] if own else ""):
+                if await self.store.add_inbound(row["thread_id"], text):
+                    stored += 1
+        return stored
 
 
 class BrainPaused(Exception):

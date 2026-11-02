@@ -466,7 +466,7 @@ class MessengerAgent:
                 continue   # VK has no personal web client here
             client = await self._personal_client(item["channel"])
             if client is None:
-                break      # no login for this channel: leave the queue alone
+                continue   # no login for this channel; other channels carry on
             result = await client.check_availability(item["handle"])
             await self.store.set_availability(item["id"], result.status)
             await self.state.log_action(
@@ -494,9 +494,7 @@ class MessengerAgent:
                 continue   # unverified: it waits for you to send it yourself
             if await self.store.personal_sent_since(_utc_midnight()) >= pcfg.max_sends_per_day:
                 break
-            domain_row = await self.store._rows(
-                "SELECT domain FROM companies WHERE id = ?", (item["company_id"],))
-            domain = domain_row[0]["domain"] if domain_row else ""
+            domain = item["company_domain"] or item["handle"].partition("@")[2]
             issues = gate.problems(item["body"], self.config, kind="cold", company_domain=domain)
             if issues:
                 await self.store._run(
@@ -505,7 +503,7 @@ class MessengerAgent:
                 continue
             client = await self._personal_client(item["channel"])
             if client is None:
-                break
+                continue   # no login for this channel; other channels carry on
             result = await client.send_first_message(item["handle"], item["body"])
             if not result["ok"]:
                 await self.store._run(

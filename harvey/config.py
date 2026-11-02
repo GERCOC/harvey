@@ -11,7 +11,7 @@ import yaml
 from harvey.textio import read_user_text
 from dotenv import load_dotenv
 from pydantic import (
-    BaseModel, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
+    BaseModel, Field, PrivateAttr, TypeAdapter, ValidationError, field_validator, model_validator,
 )
 
 from harvey.paths import PROJECT_ROOT
@@ -380,12 +380,14 @@ class MessengersConfig(BaseModel):
     # Bot conversations: true holds every answer for you; false sends them
     # (an answer with a link that isn't yours still waits).
     require_approval: bool = True
-    telegram: TelegramBotConfig = TelegramBotConfig()
-    vk: VkGroupConfig = VkGroupConfig()
-    whatsapp: WhatsAppCloudConfig = WhatsAppCloudConfig()
+    telegram: TelegramBotConfig = Field(default_factory=TelegramBotConfig)
+    vk: VkGroupConfig = Field(default_factory=VkGroupConfig)
+    whatsapp: WhatsAppCloudConfig = Field(default_factory=WhatsAppCloudConfig)
     # Personal-account checks and sends through the web clients (risky;
     # needs enabled + confirm_risk, and one approval per first message).
-    personal: PersonalMessengerConfig = PersonalMessengerConfig()
+    # default_factory, not a shared instance: pydantic v2 deep-copies model
+    # defaults on validation, which silently dropped caller-supplied values.
+    personal: PersonalMessengerConfig = Field(default_factory=PersonalMessengerConfig)
 
     @field_validator("channel_order")
     @classmethod
@@ -416,9 +418,11 @@ class MessengersConfig(BaseModel):
 
 
 class ChannelsConfig(BaseModel):
-    email: EmailChannelConfig = EmailChannelConfig()
-    linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
-    messengers: MessengersConfig = MessengersConfig()
+    # default_factory, not shared instances: pydantic v2 deep-copies model
+    # defaults on validation, which silently dropped caller-supplied values.
+    email: EmailChannelConfig = Field(default_factory=EmailChannelConfig)
+    linkedin: LinkedInChannelConfig = Field(default_factory=LinkedInChannelConfig)
+    messengers: MessengersConfig = Field(default_factory=MessengersConfig)
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")
@@ -727,11 +731,13 @@ class HarveyConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
     icp: ICPConfig
-    channels: ChannelsConfig = ChannelsConfig()
-    usage: UsageConfig = UsageConfig()
-    brain: BrainConfig = BrainConfig()
-    compliance: ComplianceConfig = ComplianceConfig()
-    writer: WriterConfig = WriterConfig()
+    # default_factory, not shared instances: pydantic v2 reuses a model-class
+    # default object across validations, which silently dropped caller values.
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    usage: UsageConfig = Field(default_factory=UsageConfig)
+    brain: BrainConfig = Field(default_factory=BrainConfig)
+    compliance: ComplianceConfig = Field(default_factory=ComplianceConfig)
+    writer: WriterConfig = Field(default_factory=WriterConfig)
     # The file it was loaded from, so a running Harvey can re-read the
     # sending mode from that same file (refresh_sending_mode).
     _source_path: str | None = PrivateAttr(default=None)

@@ -47,6 +47,28 @@ def _view(item: dict) -> dict:
             "prefills": prefills_text(channel, handle)}
 
 
+@router.post("/api/messengers/cold/{item_id}/approve-personal")
+async def cold_approve_personal(item_id: str):
+    """Harvey sends this exact draft once, from your logged-in personal
+    account. Only a reachable contact qualifies; everything else stays the
+    manual open-link flow."""
+    store, config, state = await _ctx()
+    pcfg = config.channels.messengers.personal
+    if not (pcfg.enabled and pcfg.confirm_risk):
+        return _refuse("Personal sending is off: channels.messengers.personal needs enabled "
+                       "and confirm_risk (docs/messengers.md).")
+    item = await store.get_cold(item_id)
+    if not item or item["status"] != "pending_review" or item["step"] != 1:
+        return _refuse("This message isn't waiting for approval.")
+    if item["availability"] != "reachable":
+        return _refuse("Harvey hasn't confirmed this contact is reachable from your account; "
+                       "send it yourself with the link instead.")
+    if not await store.approve_cold(item_id):
+        return _refuse("This message can't be approved now.")
+    await state.log_action("messenger_personal_approved", "dashboard", {"item": item_id})
+    return {"success": True}
+
+
 @router.get("/api/messengers")
 async def messengers_overview():
     try:
@@ -57,9 +79,12 @@ async def messengers_overview():
     cfg = config.channels.messengers
     env = load_env()
     sent_today = await store.sent_since(_today())
+    pcfg = cfg.personal
     return {
         "enabled": cfg.enabled,
         "require_approval": cfg.require_approval,
+        "personal": {"enabled": pcfg.enabled and pcfg.confirm_risk,
+                     "accounts": await store.personal_accounts()},
         "bots": {
             "telegram": cfg.telegram.enabled, "vk": cfg.vk.enabled,
             "whatsapp": cfg.whatsapp.enabled,
@@ -68,6 +93,7 @@ async def messengers_overview():
         "sent_today": sent_today,
         "daily_cap": cfg.max_daily_manual_sends,
         "queue": [_view(i) for i in await store.list_cold(("pending_review",))],
+        "approved": [_view(i) for i in await store.list_cold(("approved",))],
         "scheduled": [_view(i) for i in await store.list_cold(("scheduled",))],
         "done": [_view(i) for i in await store.list_cold(("sent", "skipped", "cancelled"),
                                                          limit=30, newest_first=True)],

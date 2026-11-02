@@ -153,6 +153,13 @@ class MessengerStore:
                WHERE id = ? AND status IN ('pending_review', 'waiting', 'scheduled')""",
             (body, item_id)))
 
+    async def approve_cold(self, item_id: str) -> bool:
+        """You said: send this exact text from your own account, Harvey."""
+        return bool(await self._run(
+            """UPDATE messenger_outbox SET status = 'approved', updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND step = 1 AND status = 'pending_review'""",
+            (item_id,)))
+
     async def mark_cold_sent(self, item_id: str, followup_days: int) -> bool:
         """You sent it. Its follow-up (if any) is due ``followup_days`` later."""
         now = _now()
@@ -211,6 +218,83 @@ class MessengerStore:
             """UPDATE messenger_outbox SET status = 'pending_review', updated_at = CURRENT_TIMESTAMP
                WHERE status = 'scheduled' AND send_at <= ?""",
             (_ts(_now()),))
+
+    # ── Personal-account availability checks (harvey/messengers/personal.py) ──
+
+    async def unchecked_cold(self, limit: int = 10) -> list[dict]:
+        """First-message drafts nobody has looked at from your own account."""
+        return await self._rows(
+            """SELECT * FROM messenger_outbox WHERE step = 1 AND status = 'pending_review'
+               AND availability IN ('', 'unknown') ORDER BY created_at LIMIT ?""",
+            (int(limit),))
+
+    async def set_availability(self, item_id: str, status: str) -> None:
+        await self._run(
+            """UPDATE messenger_outbox SET availability = ?, availability_checked_at = ?,
+                      updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (status, _ts(_now()), item_id))
+
+    async def checked_since(self, since: datetime) -> int:
+        rows = await self._rows(
+            "SELECT COUNT(*) AS n FROM messenger_outbox WHERE availability_checked_at >= ?",
+            (_ts(since),))
+        return rows[0]["n"] if rows else 0
+
+    async def personal_sent_since(self, since: datetime) -> int:
+        """First messages Harvey itself sent from your account today."""
+        rows = await self._rows(
+            """SELECT COUNT(*) AS n FROM messenger_outbox
+               WHERE status = 'sent' AND sent_at >= ? AND thread_id != ''""",
+            (_ts(since),))
+        return rows[0]["n"] if rows else 0
+
+    async def mark_cold_personal_sent(self, item_id: str, followup_days: int) -> bool:
+        """Harvey sent this approved first message from your own account.
+        Same bookkeeping as a manual send: its follow-up becomes due later."""
+        now = _now()
+        async with self.state._connect() as db:
+            cur = await db.execute(
+                """UPDATE messenger_outbox SET status = 'sent', sent_at = ?, error = '',
+                          updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND status = 'approved'""",
+                (_ts(now), item_id))
+            if not cur.rowcount:
+                return False
+            async with db.execute(
+                    "SELECT company_id, step FROM messenger_outbox WHERE id = ?", (item_id,)) as c:
+                company_id, step = await c.fetchone()
+            if step == 1:
+                nxt = "scheduled" if followup_days > 0 else "cancelled"
+                await db.execute(
+                    """UPDATE messenger_outbox SET status = ?,
+                              send_at = CASE WHEN ? = 'scheduled' THEN ? ELSE send_at END,
+                              updated_at = CURRENT_TIMESTAMP
+                       WHERE company_id = ? AND step = 2 AND status = 'waiting'""",
+                    (nxt, nxt, _ts(now + timedelta(days=followup_days)), company_id))
+            await db.commit()
+        return True
+
+    # ── Personal logins (the browser profile lives on disk; here only its state) ──
+
+    async def personal_accounts(self) -> dict[str, dict]:
+        rows = await self._rows("SELECT * FROM messenger_personal_accounts")
+        return {r["channel"]: r for r in rows}
+
+    async def set_personal_account(self, channel: str, **fields) -> None:
+        allowed = {"transport", "display_name", "session_path", "status", "last_error", "qr_at"}
+        fields = {k: v for k, v in fields.items() if k in allowed}
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        vals = tuple(fields.values())
+        if sets:
+            await self._run(
+                f"""INSERT INTO messenger_personal_accounts (channel, {sets}) VALUES (?, {vals})
+                    ON CONFLICT(channel) DO UPDATE SET {", ".join(f"{k}=excluded.{k}" for k in fields)},
+                    updated_at = CURRENT_TIMESTAMP""",
+                (channel, *vals))
+        else:
+            await self._run(
+                """INSERT OR IGNORE INTO messenger_personal_accounts (channel) VALUES (?)""",
+                (channel,))
 
     # ── Conversations ──
 

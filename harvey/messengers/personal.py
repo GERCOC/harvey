@@ -51,6 +51,15 @@ TELEGRAM_SEND_SELECTOR = "button[aria-label='Send'], .send-button-icon"
 WHATSAPP_INPUT_SELECTOR = "div[contenteditable='true'][data-tab]"
 WHATSAPP_SEND_SELECTOR = "button[aria-label='Send'], button[data-icon='send']"
 
+# A Telegram username that is really a bot: sending it a DM only ever gets
+# the auto-reply, so such contacts are never checked or sent to.
+BOT_SUFFIXES = ("bot", "assistant", "help", "support")
+
+
+def is_bot_handle(handle: str) -> bool:
+    name = (handle or "").lstrip("@").lower()
+    return any(name.endswith(s) for s in BOT_SUFFIXES)
+
 
 @dataclass
 class AvailabilityResult:
@@ -271,6 +280,8 @@ class PersonalClient:
     async def check_availability(self, handle: str) -> AvailabilityResult:
         if not self.usable:
             return AvailabilityResult(UNKNOWN, "personal sending is off")
+        if is_bot_handle(handle):
+            return AvailabilityResult(UNKNOWN, "the contact looks like a bot account")
         url = chat_url(self.channel, handle)
         if not url:
             return AvailabilityResult(UNKNOWN, "Harvey can't build a chat link for this contact")

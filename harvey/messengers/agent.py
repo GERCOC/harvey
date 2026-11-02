@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from harvey.messengers import gate
 from harvey.messengers.bots import NO_TEXT, WhatsAppCloud, configured_bots
 from harvey.messengers.contacts import CHANNEL_LABELS, SIGNAL_FOR
+from harvey.messengers.personal import PERSONAL_CHANNELS, PersonalClient, REACHABLE, UNKNOWN
 from harvey.messengers.store import MessengerStore, _now
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
@@ -45,10 +46,36 @@ class MessengerAgent:
         self.store = MessengerStore(state)
         self.bots = configured_bots(config, env, transport=transport)
         self.send_pacing = True
+        self.personal_clients: dict[str, PersonalClient] = {}   # tests inject fakes
 
     @property
     def cfg(self):
         return self.config.channels.messengers
+
+    async def _personal_client(self, channel: str) -> PersonalClient | None:
+        """One live browser session per channel, opened only when personal
+        sending is on and a login exists. None without either."""
+        pcfg = self.cfg.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return None
+        client = self.personal_clients.get(channel)
+        if client is not None:
+            return client
+        accounts = await self.store.personal_accounts()
+        account = accounts.get(channel) or {}
+        if account.get("status") != "logged_in":
+            return None
+        from harvey.messengers.personal import BrowserSession
+
+        session = BrowserSession(channel)
+        try:
+            await session.start()
+        except Exception as e:
+            logger.warning(f"Personal {channel}: the browser didn't start: {type(e).__name__}")
+            return None
+        client = PersonalClient(channel, session, pcfg, pacing=self.send_pacing)
+        self.personal_clients[channel] = client
+        return client
 
     async def run(self) -> dict:
         """One pass. Each part fails on its own: a VK outage doesn't stop
@@ -60,7 +87,9 @@ class MessengerAgent:
             report["requeued"] = await self.store.requeue_autopilot()
         for name, step in (("received", self.read_inbound), ("answered", self.answer_threads),
                            ("sent", self.send_approved), ("released", self.store.release_due),
-                           ("drafted", self.draft_first_messages)):
+                           ("drafted", self.draft_first_messages),
+                           ("checked", self.check_personal_availability),
+                           ("personal_sent", self.send_approved_personal)):
             try:
                 report[name] = await step()
             except Exception as e:
@@ -415,6 +444,86 @@ class MessengerAgent:
             return {}
         return {"message": str(result.get("message") or ""),
                 "followup": str(result.get("followup") or "")}
+
+    # ── 6. Personal accounts: availability checks, then approved sends ──
+
+    async def check_personal_availability(self) -> int:
+        """Look at each fresh draft's contact from your own logged-in account
+        and record what the service says. Checks alone never message anyone;
+        a reachable contact only makes the draft offer Harvey as one way to
+        send it — the message still waits for you to approve that exact text."""
+        pcfg = self.cfg.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return 0
+        paused = await self.state.get_setting("sending_paused")
+        if paused:
+            return 0   # the kill switch stops the browser too
+        room = pcfg.max_checks_per_day - await self.store.checked_since(_utc_midnight())
+        checked = 0
+        for item in await self.store.unchecked_cold(max(room, 0)):
+            if item["channel"] not in PERSONAL_CHANNELS:
+                continue   # VK has no personal web client here
+            client = await self._personal_client(item["channel"])
+            if client is None:
+                break      # no login for this channel: leave the queue alone
+            result = await client.check_availability(item["handle"])
+            await self.store.set_availability(item["id"], result.status)
+            await self.state.log_action(
+                "messenger_availability_check", "messengers",
+                {"item": item["id"], "channel": item["channel"], "status": result.status})
+            if result.status != UNKNOWN:
+                checked += 1
+        return checked
+
+    async def send_approved_personal(self) -> int:
+        """First messages you approved on the dashboard go out through your
+        own account — exactly one per business, inside the limits, and never
+        while sending is paused. Everything else stays manual."""
+        pcfg = self.cfg.personal
+        if not (pcfg.enabled and pcfg.confirm_risk):
+            return 0
+        paused = await self.state.get_setting("sending_paused")
+        if paused:
+            return 0
+        sent = 0
+        for item in await self.store.list_cold(("approved",), limit=5):
+            if item["step"] != 1 or item["channel"] not in PERSONAL_CHANNELS:
+                continue
+            if item["availability"] != REACHABLE:
+                continue   # unverified: it waits for you to send it yourself
+            if await self.store.personal_sent_since(_utc_midnight()) >= pcfg.max_sends_per_day:
+                break
+            domain_row = await self.store._rows(
+                "SELECT domain FROM companies WHERE id = ?", (item["company_id"],))
+            domain = domain_row[0]["domain"] if domain_row else ""
+            issues = gate.problems(item["body"], self.config, kind="cold", company_domain=domain)
+            if issues:
+                await self.store._run(
+                    "UPDATE messenger_outbox SET error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    ("; ".join(issues)[:500], item["id"]))
+                continue
+            client = await self._personal_client(item["channel"])
+            if client is None:
+                break
+            result = await client.send_first_message(item["handle"], item["body"])
+            if not result["ok"]:
+                await self.store._run(
+                    "UPDATE messenger_outbox SET error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (result["error"][:500], item["id"]))
+                continue
+            thread = await self.store.thread_for(
+                item["channel"], "manual", f"{item['channel']}:{item['handle']}",
+                handle=item["handle"], company_id=item["company_id"])
+            mid = await self.store.add_outbound(thread["id"], item["body"], "sent",
+                                                approved_by="you")
+            await self.store.mark_message_sent(mid)
+            if await self.store.mark_cold_personal_sent(item["id"], self.cfg.followup_days):
+                await self.store._run(
+                    "UPDATE messenger_outbox SET thread_id = ? WHERE id = ?", (thread["id"], item["id"]))
+                sent += 1
+                await self.state.log_action("messenger_personal_sent", "messengers",
+                                            {"item": item["id"], "channel": item["channel"]})
+        return sent
 
 
 class BrainPaused(Exception):

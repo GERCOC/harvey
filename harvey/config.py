@@ -320,6 +320,37 @@ class WhatsAppCloudConfig(BaseModel):
     api_version: str = "v21.0"
 
 
+class PersonalMessengerConfig(BaseModel):
+    """Checking availability and sending approved first messages from your
+    *personal* Telegram/WhatsApp through their web clients in a browser —
+    not an official API (docs/messengers.md). The platforms forbid this;
+    your number can be limited or banned. Off until both flags below say
+    yes, and even then the first message goes only after you approve it."""
+    enabled: bool = False
+    # A separate written agreement that you accept the ban risk yourself.
+    confirm_risk: bool = False
+    # Checks + sends happen only inside this window, like a person's day.
+    active_hours: tuple[str, str] = ("09:00", "18:00")
+    max_checks_per_day: int = 25
+    max_sends_per_day: int = 5
+    # Random pause between two browser actions, seconds.
+    action_gap_seconds: tuple[float, float] = (20.0, 90.0)
+
+    @field_validator("active_hours")
+    @classmethod
+    def _clock_times(cls, v: tuple[str, str]) -> tuple[str, str]:
+        out = []
+        for t in v:
+            try:
+                h, m = str(t).split(":")
+                if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"active_hours wants HH:MM, got {t!r}")
+            out.append(f"{int(h):02d}:{int(m):02d}")
+        return (out[0], out[1])
+
+
 class MessengersConfig(BaseModel):
     """Telegram, WhatsApp and VK (docs/messengers.md).
 
@@ -352,6 +383,9 @@ class MessengersConfig(BaseModel):
     telegram: TelegramBotConfig = TelegramBotConfig()
     vk: VkGroupConfig = VkGroupConfig()
     whatsapp: WhatsAppCloudConfig = WhatsAppCloudConfig()
+    # Personal-account checks and sends through the web clients (risky;
+    # needs enabled + confirm_risk, and one approval per first message).
+    personal: PersonalMessengerConfig = PersonalMessengerConfig()
 
     @field_validator("channel_order")
     @classmethod

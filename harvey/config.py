@@ -380,9 +380,9 @@ class MessengersConfig(BaseModel):
     # Bot conversations: true holds every answer for you; false sends them
     # (an answer with a link that isn't yours still waits).
     require_approval: bool = True
-    telegram: TelegramBotConfig = TelegramBotConfig()
-    vk: VkGroupConfig = VkGroupConfig()
-    whatsapp: WhatsAppCloudConfig = WhatsAppCloudConfig()
+    telegram: TelegramBotConfig = Field(default_factory=TelegramBotConfig)
+    vk: VkGroupConfig = Field(default_factory=VkGroupConfig)
+    whatsapp: WhatsAppCloudConfig = Field(default_factory=WhatsAppCloudConfig)
     # Personal-account checks and sends through the web clients (risky;
     # needs enabled + confirm_risk, and one approval per first message).
     # default_factory, not a shared instance: pydantic v2 deep-copies model
@@ -418,9 +418,11 @@ class MessengersConfig(BaseModel):
 
 
 class ChannelsConfig(BaseModel):
-    email: EmailChannelConfig = EmailChannelConfig()
-    linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
-    messengers: MessengersConfig = MessengersConfig()
+    # default_factory, not shared instances: pydantic v2 deep-copies model
+    # defaults on validation, which silently dropped caller-supplied values.
+    email: EmailChannelConfig = Field(default_factory=EmailChannelConfig)
+    linkedin: LinkedInChannelConfig = Field(default_factory=LinkedInChannelConfig)
+    messengers: MessengersConfig = Field(default_factory=MessengersConfig)
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")

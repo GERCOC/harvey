@@ -99,7 +99,13 @@ def _clean_domain(domain: str) -> str:
 
 
 def _clean_name_part(value: str) -> str:
-    return re.sub(r"[^a-z]", "", (value or "").lower())
+    """Latin letters only. A Cyrillic name is transliterated first (Иванов ->
+    ivanov), since an address is written in Latin letters."""
+    value = value or ""
+    if re.search(r"[А-Яа-яЁё]", value):
+        from harvey.collectors.russian import transliterate
+        value = transliterate(value)
+    return re.sub(r"[^a-z]", "", value.lower())
 
 
 def build_email(pattern: str, first: str, last: str, domain: str) -> str:

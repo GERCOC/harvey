@@ -9,6 +9,25 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Finding the owner on Russian-language sites** (`harvey/collectors/russian.py`).
+  The owner finder now reads Cyrillic as well as English, and English pages
+  are read exactly as before. It understands «Фамилия Имя Отчество» and
+  «Имя Отчество Фамилия» (and plain «Имя Фамилия» when the first name is a
+  known one), titles such as генеральный директор, директор, руководитель,
+  основатель, владелец and ИП, and tells a function head (коммерческий
+  директор, директор по маркетингу, руководитель отдела продаж) and a deputy
+  from the person who decides. It follows menus and paths like «Команда»,
+  «О компании», `/komanda`, `/o-kompanii` and `/kontakty`, reads sentences
+  and footers («Генеральный директор: …», «ИП …»), drops customers quoted in
+  reviews and people the page remembers («ушёл из жизни»), and matches a
+  Cyrillic business name to its Latin domain. A Cyrillic name is
+  transliterated to build an email pattern (Иванов → ivanov), and the address
+  is verified as before. Names in the genitive or instrumental case
+  («основана Иваном Петровым») are skipped, never guessed. An ICP written in
+  English («owner», «ceo») also finds a Russian title, and the other way
+  round. A Russian homepage with no usable menu is tried under Russian page
+  names; an English one never spends requests on them.
+
 - **Messengers: Telegram, WhatsApp and VK** (`channels.messengers`, off by
   default; docs/messengers.md). Three new signals (`MESSENGER_TELEGRAM`,
   `MESSENGER_WHATSAPP`, `MESSENGER_VK`) record the accounts a business links

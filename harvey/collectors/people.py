@@ -25,6 +25,11 @@ from urllib.parse import unquote, urljoin, urlparse
 from harvey.collectors.profile import (
     NON_NAME_WORDS, ROLE_HINT, _NOUN_SUFFIX, _reads_like_title, _strip_code,
 )
+from harvey.collectors.russian import (
+    LINK_WEIGHTS_RU, RU_OWNER_FAMILY, RU_SKIP_LINK, has_cyrillic, norm_ru, ru_departed,
+    ru_is_former, ru_is_owner_title, ru_owner_rank, ru_prose_people, ru_title_aliases,
+    split_russian_name, transliterate, STRONG_ROLE_RU,
+)
 
 # ── what a name is ───────────────────────────────────────────────────────
 
@@ -81,6 +86,8 @@ def split_person_name(text: str) -> tuple[str, str] | None:
     """
     text = html_lib.unescape(text or "").replace("\xa0", " ")
     text = re.sub(r"\s+", " ", text).strip(" ,.-|–—")
+    if has_cyrillic(text):
+        return split_russian_name(text)
     text = re.sub(r"(?i)^(?:meet|introducing)\s+", "", text)
     text = _HONORIFIC.sub("", text)
     text = _CREDENTIAL_TAIL.sub("", text).strip(" ,")
@@ -153,7 +160,8 @@ def is_owner_title(title: str) -> bool:
     title = (title or "").strip()
     if not title or _SUBORDINATE.search(title) or _FORMER.search(title):
         return False
-    return bool(_OWNER_TITLE.search(title) or _PARTNER_ONLY.match(title))
+    return bool(_OWNER_TITLE.search(title) or _PARTNER_ONLY.match(title)
+                or (has_cyrillic(title) and ru_is_owner_title(title)))
 
 
 def _clean_for_target(title: str, target: str) -> str:
@@ -178,15 +186,21 @@ def title_matches(title: str, targets, owner: bool = False) -> bool:
     """
     title = (title or "").strip()
     targets = [t.strip().lower() for t in (targets or []) if t and t.strip()]
-    if not targets or _FORMER.search(title):
+    if not targets or _FORMER.search(title) or ru_is_former(title):
         return False
-    owner_targets = [t for t in targets if t in _OWNER_FAMILY or t == "partner"]
+    owner_targets = [t for t in targets
+                     if t in _OWNER_FAMILY or t == "partner" or norm_ru(t) in RU_OWNER_FAMILY]
     if owner_targets and (owner or is_owner_title(title)):
         return True
     if not title:
         return False
+    # A Russian title also answers to its English synonyms ("owner", "ceo"),
+    # so an ICP written in either language finds it.
+    searchable = f"{title} {ru_title_aliases(title)}".strip() if has_cyrillic(title) else title
     for t in targets:
-        cleaned = _clean_for_target(title, t)
+        cleaned = _clean_for_target(searchable, t)
+        if has_cyrillic(t):
+            cleaned, t = norm_ru(cleaned), norm_ru(t)
         if re.search(rf"(?<![\w-]){re.escape(t)}(?![\w])", cleaned):
             return True
     return False
@@ -195,6 +209,9 @@ def title_matches(title: str, targets, owner: bool = False) -> bool:
 def owner_rank(title: str, owner: bool = False) -> int:
     """How surely this title is the decision maker (higher first)."""
     low = (title or "").lower()
+    ru = ru_owner_rank(title, owner)
+    if ru is not None:
+        return max(ru, 90) if owner and ru < 90 else ru
     if is_owner_title(title):
         if re.search(r"\b(?:co-?owner|owner|proprietor)\b", low):
             return 100
@@ -222,16 +239,27 @@ contracting home homes repair center clinic health care analytics software labs
 
 
 def _alnum(text: str) -> str:
+    if has_cyrillic(text):
+        text = transliterate(text)
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
 def _domain_label(domain: str) -> str:
     host = (domain or "").lower().strip().removeprefix("www.")
     host = re.sub(r"^https?://", "", host).split("/")[0]
+    if "xn--" in host:      # домен.рф arrives as punycode
+        try:
+            host = host.encode("ascii").decode("idna")
+        except (UnicodeError, ValueError):
+            pass
     parts = [p for p in host.split(".") if p]
     if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "net") and len(parts[-1]) == 2:
-        return parts[-3]
-    return parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+        label = parts[-3]
+    elif len(parts) >= 3 and parts[-1] == "ru" and parts[-2] in ("com", "org", "net", "spb", "msk", "pp", "int"):
+        label = parts[-3]
+    else:
+        label = parts[-2] if len(parts) >= 2 else (parts[0] if parts else "")
+    return transliterate(label) if has_cyrillic(label) else label
 
 
 def _business_blob(domain: str, site_name: str = "") -> str:
@@ -242,7 +270,8 @@ def names_business(text: str, domain: str, site_name: str = "") -> bool:
     """Does an organisation name refer to this business? ("Tallyway Analytics"
     is tallyway.test; "Bluefinch Labs" is not countwise.test.)"""
     blob = _business_blob(domain, site_name)
-    words = [w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+    latin = transliterate(text) if has_cyrillic(text) else (text or "")
+    words = [w for w in re.findall(r"[a-z0-9]+", latin.lower())
              if len(w) >= 3 and w not in _GENERIC_BUSINESS_WORDS]
     if any(w in blob for w in words):
         return True
@@ -255,7 +284,8 @@ def surname_on_the_door(last_name: str, domain: str, site_name: str = "") -> boo
     """The person's surname is in the business name: "Ashby & Kerr",
     hollisfamilydental.test. Owners name their practices after themselves."""
     blob = _business_blob(domain, site_name)
-    for part in re.findall(r"[A-Za-z]+", last_name or ""):
+    latin_last = transliterate(last_name) if has_cyrillic(last_name) else (last_name or "")
+    for part in re.findall(r"[A-Za-z]+", latin_last):
         p = part.lower()
         if len(p) >= 4 and p not in _GENERIC_BUSINESS_WORDS and p in blob:
             return True
@@ -285,7 +315,7 @@ def title_names_other_org(title: str, domain: str, site_name: str = "") -> bool:
 # ── text of a page, as lines ─────────────────────────────────────────────
 
 _QUOTED_CLASS = re.compile(r"""(?is)<(\w+)\b[^>]*\bclass\s*=\s*["'][^"']*\b(?:testimonials?|reviews?|tweets?|"""
-                           r"""quotes?|blockquote|client-say|customer-say|endorsements?)\b[^"']*["'][^>]*>""")
+                           r"""quotes?|blockquote|client-say|customer-say|endorsements?|otzyv\w*|feedback)\b[^"']*["'][^>]*>""")
 _STATUS_LINK = re.compile(r"""(?is)<a\b[^>]*href\s*=\s*["'][^"']*(?:twitter|x)\.com/[^"']*/status/[^"']*["'][^>]*>.*?</a>""")
 
 
@@ -360,23 +390,24 @@ def _sentences(html: str) -> list[str]:
         block = re.sub(r"\s+", " ", block).strip()
         # "Dr. Maren", "Elliot T. Marwood": an abbreviation's full stop
         # is not the end of a sentence.
-        block = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|St|Jr|Sr|Inc|Co|Ltd|[A-Z])\. ", "\\1.\xa0", block)
+        block = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|St|Jr|Sr|Inc|Co|Ltd|[A-ZА-ЯЁ])\. ", "\\1.\xa0", block)
         if block:
-            out.extend(s.strip() for s in re.split(r"(?<=[.!?]) +(?=[A-Z])", block) if s.strip())
+            out.extend(s.strip() for s in re.split(r"(?<=[.!?]) +(?=[A-ZА-ЯЁ])", block) if s.strip())
     return out
 
 
 # ── people on cards and lists ────────────────────────────────────────────
 
 # A line that is a quotation: a testimonial, so the next line is its author.
-_QUOTE_LINE = re.compile(r"^\s*[\"“‘']|[\"”’]\s*$|[★⭐]")
+_QUOTE_LINE = re.compile(r"^\s*[\"“‘'«]|[\"”’»]\s*$|[★⭐]")
 _SEPARATED = re.compile(r"^(?P<name>[^,|–—\-]{4,45}?)\s*(?:,|\||–|—|\s-\s)\s*(?P<title>.{2,80})$")
 # On one line after a comma, only an unmistakable job title counts: "Nate
 # Calloway, proud advocate for the trades." is a tagline.
 _STRONG_ROLE = re.compile(
     r"\b(?:owner|co-?owner|founder|co-?founder|president|ceo|cfo|coo|cto|cmo|cro|chief|principal|"
     r"partner|proprietor|director|manager|attorney|lawyer|dds|dmd|md|esq|cpa|dentist|"
-    r"orthodontist|officer|head of|vp|vice president|superintendent|estimator|administrator)\b", re.I)
+    r"orthodontist|officer|head of|vp|vice president|superintendent|estimator|administrator)\b"
+    r"|(?<![а-яё])(?:" + STRONG_ROLE_RU + r")(?![а-яё])", re.I)
 
 
 def _person(first, last, title, *, source, evidence, url="", owner=False, full_name=""):
@@ -546,7 +577,9 @@ _ROLE_ONLY = re.compile(r"(?i)(?:and\s+)?(?:ceo|cfo|coo|cto|cmo|president|owner|
 _DEPARTED = r"(?:passed away|died|retired|was laid to rest|is missed|rest in peace)"
 
 
-def _departed(person: dict, text: str) -> bool:
+def _departed(person: dict, text: str, lines: str = "") -> bool:
+    if has_cyrillic(person["first_name"]):
+        return ru_departed(person["first_name"], person["last_name"], lines or text)
     first, last = re.escape(person["first_name"]), re.escape(person["last_name"].split()[-1])
     return bool(re.search(
         rf"(?i)(?:\bthe late|in (?:loving )?memory of|remembering)\s+(?:dr\.?\s+)?{first}\b"
@@ -584,6 +617,10 @@ def people_from_prose(html: str, domain: str, site_name: str = "", url: str = ""
                              owner=is_owner_title(title)))
 
     for sentence in _sentences(html):
+        if has_cyrillic(sentence):
+            for raw_name, ru_title in ru_prose_people(sentence):
+                add(raw_name, ru_title, sentence)
+            continue
         for regex, fixed in _PROSE:
             for m in regex.finditer(sentence):
                 groups = m.groupdict()
@@ -683,7 +720,10 @@ def find_people(pages: list[tuple[str, str]], domain: str, site_name: str = "") 
                 cur["owner"] = cur["owner"] or p["owner"]
     people = [merged[k] for k in order]
     text = " ".join(" ".join(_sentences(html))[:200_000] for _, html in pages)
-    people = [p for p in people if not _departed(p, text)]
+    lines = ""
+    if any(has_cyrillic(p["first_name"]) for p in people):
+        lines = "\n".join("\n".join(_sentences(html))[:200_000] for _, html in pages)
+    people = [p for p in people if not _departed(p, text, lines)]
     current_owner = any(p["source"] != "prose" and p["owner"] for p in people)
     if current_owner:
         people = [p for p in people
@@ -711,12 +751,17 @@ _LINK_WEIGHTS = (
     (2, r"about|story|history|company|firm|practice|family"),
     (1, r"contact"),
 )
+# The same three levels for Russian sites: transliterated paths ("/komanda",
+# "/o-kompanii") and Cyrillic labels and paths ("Команда", "О компании").
+_LINK_WEIGHTS = tuple(
+    (w, f"{en}|{ru}") for (w, en), (_, ru) in zip(_LINK_WEIGHTS, LINK_WEIGHTS_RU))
 # A keyword counts in a whole path segment ("/our-team/", "/attorneys/",
 # "/meet-the-dentists.html") or a short menu label ("Meet the Team") — not
 # inside a practice-area slug ("/child-custody-lawyer-riverton/").
 _SKIP_LINK = re.compile(
     r"(?i)\.(?:pdf|jpe?g|png|gif|webp|svg|zip|docx?|mp4|mp3)(?:$|\?)|/(?:blog|news|posts?|articles?|"
-    r"category|tag|author|feed|wp-json|cart|checkout|login|account|careers?|jobs?)/|/\d{4}/\d{2}/|"
+    r"category|tag|author|feed|wp-json|cart|checkout|login|account|careers?|jobs?|"
+    + RU_SKIP_LINK + r")/|/\d{4}/\d{2}/|"
     r"[?&](?:replytocom|share)=|/:param")
 
 
@@ -752,15 +797,15 @@ def menu_links(html: str, page_url: str, limit: int = 5) -> list[str]:
         key = _norm_url(url)
         if key in seen or p.path.rstrip("/") in ("", "/index.html", "/index.php", "/home"):
             continue
-        text = re.sub(r"\s+", " ", html_lib.unescape(re.sub(r"(?s)<[^>]+>", " ", m.group(2)))).strip().lower()
-        segments = [re.sub(r"\.(?:html?|php|aspx?)$", "", seg) for seg in unquote(p.path).lower().split("/") if seg]
+        text = norm_ru(re.sub(r"\s+", " ", html_lib.unescape(re.sub(r"(?s)<[^>]+>", " ", m.group(2)))).strip())
+        segments = [re.sub(r"\.(?:html?|php|aspx?)$", "", seg) for seg in norm_ru(unquote(p.path)).split("/") if seg]
         label = text if len(text.split()) <= 4 else ""
         score = 0
         for weight, pattern in _LINK_WEIGHTS:
             whole = rf"^(?:our-|the-|meet-(?:the-|our-)?|about-)?(?:{pattern})(?:-(?:us|team|page|bios?|staff))?$"
             if any(re.search(whole, seg) for seg in segments) \
                     or (segments and re.match(r"^meet-", segments[-1]) and weight == 3) \
-                    or re.search(rf"(?:^|[^a-z])(?:{pattern})(?:$|[^a-z])", label):
+                    or re.search(rf"(?<![a-zа-я])(?:{pattern})(?![a-zа-я])", label):
                 score = max(score, weight)
         if not score:
             continue

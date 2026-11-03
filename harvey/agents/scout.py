@@ -38,6 +38,7 @@ from bs4 import BeautifulSoup
 
 from harvey.brain import Brain
 from harvey.collectors import people as people_mod
+from harvey.collectors.russian import RU_FALLBACK_PATHS
 from harvey.collectors.discover import site_name_from_html
 from harvey.collectors.profile import _reads_like_title, looks_like_challenge
 from harvey.config import HarveyConfig, EnvConfig
@@ -1443,7 +1444,11 @@ Respond ONLY with the JSON array."""
 
         links = people_mod.menu_links(home_text, home_url, limit=MAX_SITE_PAGES - 1)
         if len(links) < 2:
-            links += [f"{base}{p}" for p in FALLBACK_SITE_PATHS]
+            # A Russian site is tried under its Russian page names first; an
+            # English one never spends requests on them.
+            paths = (RU_FALLBACK_PATHS + FALLBACK_SITE_PATHS
+                     if people_mod.has_cyrillic(home_text) else FALLBACK_SITE_PATHS)
+            links += [f"{base}{p}" for p in paths]
         for url in links:
             if len(site["pages"]) >= MAX_SITE_PAGES:
                 break

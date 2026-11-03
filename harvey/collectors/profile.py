@@ -210,6 +210,8 @@ DECISION_MAKER_TITLES = (
 )
 
 
+from harvey.collectors.russian import ROLE_HINT_RU  # noqa: E402
+
 ROLE_HINT = re.compile(
     r"\b(owner|founder|president|ceo|cfo|coo|cto|principal|partner|manager|"
     r"director|supervisor|superintendent|foreman|estimator|specialist|"
@@ -217,7 +219,7 @@ ROLE_HINT = re.compile(
     r"office|project|account|service|technician|installer|inspector|"
     r"vice president|vp|executive|lead|head of|chief|proprietor|attorney|lawyer|"
     r"dentist|orthodontist|periodontist|endodontist|hygienist|dds|dmd|esq|cpa|"
-    r"administrator|paralegal|associate|co-?owner|co-?founder)\b", re.I)
+    r"administrator|paralegal|associate|co-?owner|co-?founder|" + ROLE_HINT_RU + r")\b", re.I)
 
 
 def title_looks_like_role(text: str) -> bool:

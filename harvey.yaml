@@ -5,6 +5,7 @@ persona:
   email: "harvey@yourcompany.com"
   linkedin: "linkedin.com/in/harvey-yourcompany"
   tone: "professional, consultative, confident"
+  # language: "ru"   # cold emails and replies in Russian; default "en" (docs/russian.md)
 
 product:
   name: "Your Product"

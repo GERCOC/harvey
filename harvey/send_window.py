@@ -189,6 +189,49 @@ COUNTRY_ALIASES = {
     "south korea": "KR", "korea": "KR", "uae": "AE", "czechia": "CZ",
     "republic of ireland": "IE", "eire": "IE",
 }
+# Countries named in Russian, as a Russian company writes its own address.
+COUNTRY_ALIASES_RU = {
+    "россия": "RU", "российская федерация": "RU", "рф": "RU", "беларусь": "BY", "белоруссия": "BY",
+    "казахстан": "KZ", "украина": "UA", "узбекистан": "UZ", "армения": "AM", "азербайджан": "AZ",
+    "кыргызстан": "KG", "киргизия": "KG", "молдова": "MD",
+}
+
+# Russia has eleven clock zones, so "Russia" alone is only a guess (Moscow).
+# A city fixes it. Names in Cyrillic are enough on their own; the Latin
+# spellings count only beside "Russia" (there is a Moscow in Idaho).
+RU_CITY_ZONES = {
+    "Europe/Kaliningrad": ("Калининград", "Kaliningrad"),
+    "Europe/Moscow": ("Москва", "Санкт-Петербург", "Питер", "Казань", "Нижний Новгород", "Воронеж",
+                      "Ростов-на-Дону", "Краснодар", "Сочи", "Ярославль", "Тула", "Рязань",
+                      "Липецк", "Белгород", "Курск", "Смоленск", "Брянск", "Орёл", "Тверь",
+                      "Владимир", "Иваново", "Кострома", "Калуга", "Ставрополь", "Архангельск",
+                      "Мурманск", "Вологда", "Петрозаводск", "Псков", "Великий Новгород",
+                      "Чебоксары", "Саранск", "Пенза", "Тамбов", "Махачкала", "Грозный",
+                      "Moscow", "Saint Petersburg", "St Petersburg", "Kazan", "Nizhny Novgorod",
+                      "Voronezh", "Rostov-on-Don", "Krasnodar", "Sochi", "Yaroslavl", "Tula"),
+    "Europe/Kirov": ("Киров", "Kirov"),
+    "Europe/Volgograd": ("Волгоград", "Volgograd"),
+    "Europe/Astrakhan": ("Астрахань", "Astrakhan"),
+    "Europe/Saratov": ("Саратов", "Saratov"),
+    "Europe/Ulyanovsk": ("Ульяновск", "Ulyanovsk"),
+    "Europe/Samara": ("Самара", "Ижевск", "Тольятти", "Samara", "Izhevsk", "Tolyatti"),
+    "Asia/Yekaterinburg": ("Екатеринбург", "Челябинск", "Уфа", "Пермь", "Тюмень", "Оренбург",
+                           "Курган", "Магнитогорск", "Сургут", "Yekaterinburg", "Ekaterinburg",
+                           "Chelyabinsk", "Ufa", "Perm", "Tyumen", "Orenburg", "Surgut"),
+    "Asia/Omsk": ("Омск", "Omsk"),
+    "Asia/Novosibirsk": ("Новосибирск", "Novosibirsk"),
+    "Asia/Barnaul": ("Барнаул", "Barnaul"),
+    "Asia/Tomsk": ("Томск", "Tomsk"),
+    "Asia/Novokuznetsk": ("Кемерово", "Новокузнецк", "Kemerovo", "Novokuznetsk"),
+    "Asia/Krasnoyarsk": ("Красноярск", "Абакан", "Krasnoyarsk"),
+    "Asia/Irkutsk": ("Иркутск", "Улан-Удэ", "Братск", "Irkutsk", "Ulan-Ude"),
+    "Asia/Chita": ("Чита", "Chita"),
+    "Asia/Yakutsk": ("Якутск", "Благовещенск", "Yakutsk"),
+    "Asia/Vladivostok": ("Владивосток", "Хабаровск", "Уссурийск", "Vladivostok", "Khabarovsk"),
+    "Asia/Sakhalin": ("Южно-Сахалинск", "Yuzhno-Sakhalinsk"),
+    "Asia/Magadan": ("Магадан", "Magadan"),
+    "Asia/Kamchatka": ("Петропавловск-Камчатский", "Petropavlovsk-Kamchatsky"),
+}
 # Other spellings of provinces and states, mapped to their codes.
 REGION_ALIASES = {"newfoundland": "NL", "labrador": "NL", "pei": "PE", "yukon territory": "YT"}
 
@@ -207,7 +250,19 @@ def _country_names() -> dict[str, str]:
     names = {_clean(name): code for code, name in pytz.country_names.items()
              if _clean(name) not in states}
     names.update(COUNTRY_ALIASES)
+    names.update({_clean(k): v for k, v in COUNTRY_ALIASES_RU.items()})
     return names
+
+
+@lru_cache(maxsize=1)
+def _ru_cities() -> tuple[dict[str, str], dict[str, str]]:
+    """(Cyrillic, Latin) city name -> zone, names cleaned like a location."""
+    cyrillic, latin = {}, {}
+    for zone, names in RU_CITY_ZONES.items():
+        for name in names:
+            target = cyrillic if re.search("[А-Яа-яЁё]", name) else latin
+            target[_clean(name)] = zone
+    return cyrillic, latin
 
 
 @lru_cache(maxsize=1)
@@ -402,6 +457,14 @@ def _region(parts: list[str], text_country: str, hint: str) -> str:
             for key, (full, zone) in AU_STATES.items():
                 if name == full or (key in codes and (context == "AU" or key in AU_CODES_ALONE)):
                     return zone
+    if context in ("", "RU"):
+        cyrillic, latin = _ru_cities()
+        for part in parts:
+            name = _clean(part)
+            if name in cyrillic:
+                return cyrillic[name]
+            if context == "RU" and name in latin:
+                return latin[name]
     return ""
 
 

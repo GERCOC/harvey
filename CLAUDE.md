@@ -44,6 +44,8 @@ People will ask "how does this work?" — explain it simply:
 
 - **"How does it write emails?"** → It uses proven cold email frameworks (like AIDA and PAS) with strict rules — short, personal, no AI-sounding language. Each email is tailored to the specific person and their company.
 
+- **"Can it write in Russian?"** → Yes. Set `persona.language: ru` in harvey.yaml (harvey.local.yaml if trained) and cold emails, replies, the footer and the opt-out line are Russian. Replies written in Russian are always answered in Russian. Opt-outs («не пишите», «отпишите», «это спам») and complaints («юрист», «жалоба», «Роскомнадзор») are decided by fixed rules. Read `docs/russian.md` first, and tell the user it is not legal advice.
+
 - **"Is it safe?"** → Yes. It runs locally on your machine, has daily usage limits, quiet hours, and send limits built in. It can't delete files, access your bank account, or do anything outside its sales workflow. Everything it does is logged in a local SQLite database you can inspect anytime.
 
 - **"What does it cost?"** → Just your Claude Max subscription (which you already have). The only paid integration is Instantly for sending emails (their cheapest plan works). Everything else — prospecting, email writing, reply handling — is included.

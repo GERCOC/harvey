@@ -19,10 +19,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from harvey.brain import Brain
 from harvey.config import (
-    HarveyConfig, EnvConfig, cold_daily_cap, compliance_footer_lines, compliance_notice,
+    HarveyConfig, EnvConfig, cold_daily_cap, compliance_footer_lines, compliance_notice, language_of,
     compliance_of, live_do_not_contact, operator_timezone, send_window_of,
 )
 from harvey.gate import autopilot_review, do_not_contact_match, pre_send_check
+from harvey.ru_text import clean_company_name
 from harvey.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from harvey.integrations.instantly import InstantlyClient
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
@@ -575,17 +576,20 @@ class Sender:
 
     def _render(self, text: str, prospect) -> str:
         """Fill merge variables. The pre-send gate rejects any leftovers."""
+        ru = language_of(getattr(self, "config", None)) == "ru"
         replacements = {
             # A company inbox has no name; "there" keeps "Hi {{first_name}}," readable.
-            "first_name": prospect.first_name or ("there" if prospect.is_company_inbox else ""),
+            "first_name": prospect.first_name or (
+                ("коллеги" if ru else "there") if prospect.is_company_inbox else ""),
             "last_name": prospect.last_name,
-            "company": prospect.company,
+            # "ООО «Ромашка»" reads as "Ромашка" in a sentence.
+            "company": clean_company_name(prospect.company),
             "title": prospect.title,
             "personalization": prospect.personalization_notes,
         }
         # "{{company}}'s" for "Parkes Builders" should read "Builders'".
-        company = prospect.company or ""
-        if company.endswith(("s", "S")):
+        company = clean_company_name(prospect.company) or ""
+        if company.endswith(("s", "S")) and company.isascii():
             for tag in ("{{company}}", "{{ company }}"):
                 text = text.replace(tag + "'s", company + "'")
                 text = text.replace(tag + "’s", company + "’")

@@ -15,7 +15,8 @@ import re
 from datetime import datetime, timezone
 
 from harvey.brain import Brain
-from harvey.config import HarveyConfig
+from harvey.config import HarveyConfig, language_of
+from harvey.ru_text import clean_company_name, skills_for
 from harvey.humanize import humanize, humanizer_enabled
 from harvey.integrations.mail_provider import NATIVE_PROVIDERS
 from harvey.models.campaign import Campaign, EmailStep
@@ -63,7 +64,7 @@ class Writer:
         logger.info("Writer: Crafting email campaigns...")
 
         # Load foundational skills for this agent
-        self.skills = self.brain.load_skills_for_agent("writer")
+        self.skills = skills_for(self.brain, "writer", language_of(self.config))
 
         # Get prospects that haven't been contacted yet
         new_prospects = await self.state.get_prospects_by_status("new")
@@ -270,10 +271,47 @@ class Writer:
             + lines
         )
 
+    def _load_writer_prompt(self, ru: bool) -> str:
+        """prompts/writer_ru.md for Russian, else (or if it is missing) writer.md."""
+        values = dict(
+            product_name=self.config.product.name,
+            product_description=self.config.product.description,
+            product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
+            product_pricing=self.config.product.pricing,
+            persona_name=self.config.persona.name,
+            persona_company=self.config.persona.company,
+            persona_role=self.config.persona.role,
+            persona_tone=self.config.persona.tone,
+        )
+        if ru:
+            prompt = self.brain.load_prompt("writer_ru", **values)
+            if prompt:
+                return prompt
+        return self.brain.load_prompt("writer", **values)
+
     async def _write_personal_email(self, prospect) -> dict | None:
         """One grounded draft for one person. Facts in, one email out."""
+        ru = language_of(self.config) == "ru"
+        company_name = clean_company_name(prospect.company) if ru else prospect.company
         inbox_rule = ""
-        if prospect.is_company_inbox:
+        if ru:
+            if prospect.is_company_inbox:
+                facts = [
+                    f"- Имя: неизвестно (общий ящик компании, {prospect.email})",
+                    f"- Компания: {company_name}",
+                ]
+                inbox_rule = (
+                    "\n- Письмо уходит на общий ящик компании, его чаще всего читает владелец"
+                    "\n  или администратор. Имени нет: начни с «Здравствуйте.» без имени.")
+            else:
+                facts = [
+                    f"- Имя: {prospect.full_name()}",
+                    f"- Должность: {prospect.title}",
+                    f"- Компания: {company_name}",
+                ]
+            if prospect.industry:
+                facts.append(f"- Отрасль: {prospect.industry}")
+        elif prospect.is_company_inbox:
             facts = [
                 f"- Name: unknown (the company's general inbox, {prospect.email})",
                 f"- Company: {prospect.company}",
@@ -288,7 +326,7 @@ class Writer:
                 f"- Title: {prospect.title}",
                 f"- Company: {prospect.company}",
             ]
-        if prospect.industry:
+        if prospect.industry and not ru:
             facts.append(f"- Industry: {prospect.industry}")
 
         company = None
@@ -299,37 +337,49 @@ class Writer:
                 company = None
         if company:
             if company.description:
-                facts.append(f"- What the company says about itself: {company.description}")
+                facts.append(f"- {'Что компания пишет о себе' if ru else 'What the company says about itself'}: {company.description}")
             if company.tech_stack:
-                facts.append(f"- Tools detected on their website: {', '.join(company.tech_stack[:6])}")
+                facts.append(f"- {'Инструменты на их сайте' if ru else 'Tools detected on their website'}: {', '.join(company.tech_stack[:6])}")
             for signal in company.signals[:3]:
                 facts.append(
-                    f"- Signal ({signal.get('type', 'signal')}): {signal.get('detail', '')}"
+                    f"- {'Сигнал' if ru else 'Signal'} ({signal.get('type', 'signal')}): {signal.get('detail', '')}"
                 )
         if prospect.personalization_notes:
-            facts.append(f"- Research notes: {prospect.personalization_notes}")
+            facts.append(f"- {'Заметки' if ru else 'Research notes'}: {prospect.personalization_notes}")
         startup = await self._startup(prospect.company_id)
         if startup is not None:
             facts.extend(startup)
 
-        prompt = self.brain.load_prompt(
-            "writer",
-            product_name=self.config.product.name,
-            product_description=self.config.product.description,
-            product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
-            product_pricing=self.config.product.pricing,
-            persona_name=self.config.persona.name,
-            persona_company=self.config.persona.company,
-            persona_role=self.config.persona.role,
-            persona_tone=self.config.persona.tone,
-        ) or ""
+        prompt = self._load_writer_prompt(ru) or ""
         if self.skills:
             prompt += "\n\n" + self.skills
         if startup is not None:
             prompt += self._startup_playbook()
         prompt += await self._feedback_block([prospect.id])
 
-        prompt += f"""
+        if ru:
+            prompt += f"""
+
+Напиши ОДНО холодное письмо (самое первое касание) этому конкретному человеку.
+
+ДАННЫЕ — всё, что известно о них, с их сайта и из интернета. Каждое утверждение
+о них в письме должно опираться на эти данные. Чего здесь нет, того ты не знаешь:
+не придумывай ни раундов инвестиций, ни общих знакомых, ни цифр:
+{fence(chr(10).join(facts), "prospect research")}
+
+{UNTRUSTED_RULE}
+
+Требования:
+- До 70 слов. Одно конкретное наблюдение из ДАННЫХ выше и один вопрос.
+  Без продажи, без названия продукта.
+- Пиши готовый текст (без переменных подстановки: имя и компанию ты знаешь).
+- Тема: 2-6 слов, первое слово с заглавной, без точки.
+- Не пиши адрес, реквизиты и строку об отказе: Harvey добавит их сам при отправке.
+- Выполни все ЖЁСТКИЕ ПРАВИЛА ПИСЬМА выше.{inbox_rule}
+
+Верни ТОЛЬКО JSON: {{"subject": "...", "body": "..."}}"""
+        else:
+            prompt += f"""
 
 Write ONE cold email (the very first touch) to this specific person.
 
@@ -366,13 +416,29 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
     async def _write_sequence(self, prospects: list) -> list[EmailStep]:
         """Ask the brain to write a 3-email sequence."""
         # Build context about the prospects
+        ru = language_of(self.config) == "ru"
         prospect_summary = "\n".join(
-            f"- {p.full_name()}, {p.title} at {p.company}"
-            + (f" | Notes: {p.personalization_notes}" if p.personalization_notes else "")
+            (f"- {p.full_name()}, {p.title}, {clean_company_name(p.company)}"
+             + (f" | Заметки: {p.personalization_notes}" if p.personalization_notes else "")
+             if ru else
+             f"- {p.full_name()}, {p.title} at {p.company}"
+             + (f" | Notes: {p.personalization_notes}" if p.personalization_notes else ""))
             for p in prospects[:5]  # Show sample for context
         )
         inbox_batch = all(p.is_company_inbox for p in prospects)
-        if inbox_batch:
+        if ru and inbox_batch:
+            merge_rule = (
+                "- Письма уходят на общие ящики компаний, имён нет. Во всех письмах\n"
+                "  используй переменную {{company}} и НИКОГДА {{first_name}} или {{title}}.\n"
+                "  Начинай с «Здравствуйте.» без имени."
+            )
+        elif ru:
+            merge_rule = (
+                "- Используй переменные {{first_name}}, {{company}}, {{title}}: в каждом письме\n"
+                "  хотя бы одну, а в первом письме сошлись на что-то конкретное для отрасли\n"
+                "  или должности этих людей (бери из заметок выше)."
+            )
+        elif inbox_batch:
             merge_rule = (
                 "- These go to each company's general inbox, so no names are known.\n"
                 "  Use {{company}} as the merge variable in every email and NEVER\n"
@@ -385,17 +451,7 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
                 "  these prospects' industry or role (use the notes above)."
             )
 
-        prompt = self.brain.load_prompt(
-            "writer",
-            product_name=self.config.product.name,
-            product_description=self.config.product.description,
-            product_benefits="\n".join(f"- {b}" for b in self.config.product.key_benefits),
-            product_pricing=self.config.product.pricing,
-            persona_name=self.config.persona.name,
-            persona_company=self.config.persona.company,
-            persona_role=self.config.persona.role,
-            persona_tone=self.config.persona.tone,
-        )
+        prompt = self._load_writer_prompt(ru)
 
         if not prompt:
             prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
@@ -418,7 +474,32 @@ Pricing: {self.config.product.pricing}"""
         # note about one person ("met her at the expo") must never reach it.
         prompt += await self._feedback_block([])
 
-        prompt += f"""
+        if ru:
+            prompt += f"""
+
+Напиши цепочку из 3 холодных писем для людей вроде этих:
+{fence(prospect_summary, "sample prospects")}
+
+{UNTRUSTED_RULE}
+
+Требования:
+- Письмо 1: персональное наблюдение и один вопрос. До 70 слов. Без продажи.
+- Письмо 2: через 3 дня. Другой угол и один конкретный довод. До 70 слов.
+- Письмо 3: вежливое прощание через 4 дня после второго. До 40 слов. Без вины и давления.
+{merge_rule}
+- Без напора и рекламного тона. Консультативно и по делу.
+- Темы: 2-6 слов, первое слово с заглавной, без точки.
+- Не пиши адрес, реквизиты и строку об отказе: Harvey добавит их сам при отправке.
+- Выполни все ЖЁСТКИЕ ПРАВИЛА ПИСЬМА выше. Исключений нет.
+
+Верни ТОЛЬКО JSON-массив (без markdown-обёрток и пояснений):
+[
+  {{"step": 1, "subject": "...", "body": "...", "delay_days": 0}},
+  {{"step": 2, "subject": "...", "body": "...", "delay_days": 3}},
+  {{"step": 3, "subject": "...", "body": "...", "delay_days": 4}}
+]"""
+        else:
+            prompt += f"""
 
 Write a 3-email cold outreach sequence for prospects like these:
 {fence(prospect_summary, "sample prospects")}

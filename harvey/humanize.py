@@ -88,6 +88,10 @@ async def humanize(
     """
     if not enabled or not drafts:
         return drafts
+    if any(re.search("[А-Яа-яЁё]", d.get("body", "") + d.get("subject", "")) for d in drafts):
+        # The Humanizer skill is a list of English writing tells: it has
+        # nothing to say about a Russian draft and would only damage it.
+        return drafts
     skill = load_skill(path)
     if not skill:
         return drafts

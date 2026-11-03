@@ -9,6 +9,28 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Cold email and replies in Russian** (`persona.language: ru`, off by
+  default; docs/russian.md). The writer uses `prompts/writer_ru.md` and the
+  Russian sequence skill, in a register that fits Russian business mail
+  («вы», «Иван, добрый день.», no chancery language, none of the words
+  Yandex and Mail.ru junk); the first email is under 70 words. The company
+  name drops its legal form (ООО «Ромашка» reads as Ромашка), and a company
+  inbox is greeted «Здравствуйте». The footer carries the sender's details
+  and a Russian opt-out line («ответьте «нет»»), which `opt_out_line` now
+  accepts. Fixed rules that no model can override now understand Russian
+  replies: «не пишите», «отпишите», «это спам», «нет, спасибо» are opt-outs;
+  «передам юристу», «жалоба», «Роскомнадзор», «152-ФЗ» go to a person; Russian
+  spam wording is stopped by the pre-send gate. A reply written in Russian is
+  answered from `prompts/handler_ru.md` whatever the setting. Opt-out and
+  complaint words are shared with messengers (`harvey/ru_text.py`). The
+  English-only Humanizer pass skips Russian drafts. The check that stops an
+  autopilot email from quoting Harvey's own instructions now reads Cyrillic
+  as well.
+- **Russian places in send windows.** A Russian address now gets its own time
+  zone: Новосибирск is `Asia/Novosibirsk`, Хабаровск `Asia/Vladivostok`,
+  Калининград `Europe/Kaliningrad` (about a hundred cities, in Cyrillic or in
+  Latin beside "Russia"), and «Россия», «РФ», «Беларусь», «Казахстан» are read
+  as countries. "Russia" alone, or an unlisted city, is still the Moscow guess.
 - **Finding the owner on Russian-language sites** (`harvey/collectors/russian.py`).
   The owner finder now reads Cyrillic as well as English, and English pages
   are read exactly as before. It understands «Фамилия Имя Отчество» and

@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 
 from harvey.brain import Brain, BrainUnavailable
 from harvey.config import (
-    DEFAULT_OPT_OUT_LINE, HarveyConfig, EnvConfig, compliance_of, legacy_sending_held,
+    DEFAULT_OPT_OUT_LINE, DEFAULT_OPT_OUT_LINE_RU, HarveyConfig, EnvConfig, compliance_of,
+    language_of, legacy_sending_held,
     live_do_not_contact,
 )
 from harvey.gate import autopilot_review, do_not_contact_match, pre_send_check
@@ -27,6 +28,10 @@ from harvey.models.conversation import Conversation, Message
 from harvey.state import COLLEAGUE_REPLIED, REVIEW_NEXT_REPLY_KEY, StateManager
 from harvey.sending_mode import sync_sending_mode
 from harvey.startups import startup_facts
+from harvey.collectors.russian import has_cyrillic
+from harvey.ru_text import (
+    BARE_OPT_OUTS_EMAIL_RU, NO_THANKS_RU_RE, OPT_OUT_PATTERNS_RU, escalation_reason, skills_for,
+)
 from harvey.untrusted import UNTRUSTED_RULE, fence
 
 logger = logging.getLogger("harvey.handler")
@@ -71,7 +76,7 @@ OPT_OUT_PATTERNS = (
     "never contact",
     "delete my info",
     "delete my data",
-)
+) + tuple(p for p in OPT_OUT_PATTERNS_RU if p not in ("unsubscribe", "remove me", "do not contact", "don't contact"))
 # "No thanks" (what cold email's footer asks for) as a phrase: not "no
 # Thanksgiving", "Bruno / Thanks," or "yes or no, thanks".
 # Checked one line at a time: "...the answer is no / Thanks!" is a sign-off.
@@ -79,7 +84,7 @@ NO_THANKS_RE = re.compile(
     r"(?<!\bor )\bno,?[ \t]+thank(?:s|[ \t]+you)\b(?![ \t]+(?:needed|necessary|required))")
 # A reply that says only this (signature aside) is an opt-out ("Reply STOP").
 BARE_OPT_OUTS = {"stop", "unsubscribe", "remove", "remove me", "opt out",
-                 "no thanks", "no thank you"}
+                 "no thanks", "no thank you"} | BARE_OPT_OUTS_EMAIL_RU
 _MOBILE_SIGNATURE_RE = re.compile(
     r"^[ \t]*(?:sent from my \w[^\n]*|get outlook for \w[^\n]*|sent from \w+ mail[^\n]*)$",
     re.IGNORECASE | re.MULTILINE)
@@ -150,18 +155,19 @@ def _opt_out_reason(their_text: str, own_words: str) -> dict | None:
     reply without the quote. Longer phrases match across a line wrap; "no
     thanks" only within a line. The result is kept with the opt-out so a
     human can see why Harvey stopped, and undo it if it was wrong."""
-    flat = _flat(their_text)
+    flat = _flat(their_text).replace("ё", "е")
     for p in OPT_OUT_PATTERNS:
         if p in flat:
             return {"rule": "phrase", "matched": p,
                     "why": f'Their reply contains "{p}".'}
     for line in their_text.split("\n"):
-        m = NO_THANKS_RE.search(_flat(line))
+        flat_line = _flat(line).replace("ё", "е")
+        m = NO_THANKS_RE.search(flat_line) or NO_THANKS_RU_RE.search(flat_line)
         if m:
             return {"rule": "no_thanks", "matched": m.group(0),
                     "why": f'Their reply says "{m.group(0)}", what the opt-out line asks for.'}
     bare = _flat(_MOBILE_SIGNATURE_RE.sub("", own_words or ""))
-    bare = re.sub(r"[^\w\s-]", "", bare).strip()
+    bare = re.sub(r"[^\w\s-]", "", bare).replace("ё", "е").strip()
     if bare in BARE_OPT_OUTS:
         return {"rule": "only_words", "matched": bare,
                 "why": f'Their reply was only "{bare}".'}
@@ -188,6 +194,13 @@ ESCALATION_PATTERNS = (
     "can-spam",
     "blacklist",
 )
+
+
+def _escalates(keyword_text: str) -> bool:
+    """A reply that must go to a human: English phrases, or the Russian ones
+    for a lawyer, a claim, a complaint, Roskomnadzor, the personal-data law."""
+    return any(p in keyword_text for p in ESCALATION_PATTERNS) or bool(escalation_reason(keyword_text))
+
 
 
 # The conversation a reply is written from. Cold-email threads are short, so
@@ -280,7 +293,7 @@ class Handler:
         logger.info("Handler: Checking for replies...")
 
         # Load foundational skills for this agent
-        self.skills = self.brain.load_skills_for_agent("handler")
+        self.skills = skills_for(self.brain, "handler", language_of(self.config))
 
         if not self.config.channels.email.enabled:
             return True
@@ -371,6 +384,7 @@ class Handler:
             *await self.state.get_texts_for_prospect(prospect.id),
             *await self.state.get_footer_history(),
             compliance.postal_address, compliance.opt_out_line, DEFAULT_OPT_OUT_LINE,
+            DEFAULT_OPT_OUT_LINE_RU,
         ])
 
     async def _stop_colleagues(self, prospect):
@@ -465,7 +479,7 @@ class Handler:
         reply_text = ours.remove(stripped).strip() or stripped
 
         if prospect.status == "opted_out":
-            escalate = any(p in keyword_text for p in ESCALATION_PATTERNS)
+            escalate = _escalates(keyword_text)
             await self._record_after_opt_out(prospect, reply_text, campaign_id, escalate)
             return
 
@@ -487,7 +501,7 @@ class Handler:
         opt_out = _opt_out_reason(their_text, reply_text)
         if opt_out:
             intent = "unsubscribe"
-        elif any(p in keyword_text for p in ESCALATION_PATTERNS):
+        elif _escalates(keyword_text):
             intent = "escalate"
         else:
             intent = await self._classify_intent(reply_text, prospect)
@@ -866,6 +880,9 @@ class Handler:
 
 When in doubt between "not_interested" and "unsubscribe", choose "unsubscribe".
 When in doubt between anything and "escalate", choose "escalate".
+The reply may be in Russian: "в отпуске", "автоответ" is "ooo"; "не пишите мне",
+"отпишите" is "unsubscribe"; "передам юристу", "жалоба" is "escalate". Answer
+with the English label either way.
 
 {UNTRUSTED_RULE}
 
@@ -913,13 +930,18 @@ Respond with ONLY the category label, nothing else."""
         # Stage advancement rules
         if intent == "interested":
             # Meeting/call signals from an interested prospect → closing
-            if any(w in text_lower for w in ["let's meet", "schedule", "calendar", "book a call", "free on", "available"]):
+            if any(w in text_lower for w in ["let's meet", "schedule", "calendar", "book a call", "free on", "available",
+                                             "давайте созвон", "созвонимся", "давайте встретимся", "назначим встречу",
+                                             "запишите", "запишите нас", "когда вам удобно", "я свободен", "я свободна",
+                                             "свободны в"]):
                 return "closing"
             if current_stage == "initial_outreach":
                 return "engaged"
             if current_stage == "engaged":
                 # Check if they're asking about specifics → presenting
-                if any(w in text_lower for w in ["price", "cost", "how much", "pricing", "demo", "trial"]):
+                if any(w in text_lower for w in ["price", "cost", "how much", "pricing", "demo", "trial",
+                                                 "сколько стоит", "цена", "цены", "стоимость", "прайс",
+                                                 "демо", "пробный", "тариф"]):
                     return "presenting"
                 return "qualifying"
             if current_stage in ("qualifying", "presenting"):
@@ -955,15 +977,22 @@ Respond with ONLY the category label, nothing else."""
                     objection_context = f"\nSuggested approach for this objection: {response}"
                     break
 
-        prompt = self.brain.load_prompt("handler", stage=convo.stage)
+        # They wrote in Russian, or Harvey is set to write in Russian: answer in Russian.
+        reply_ru = has_cyrillic(reply_text) or language_of(self.config) == "ru"
+        prompt = self.brain.load_prompt("handler_ru" if reply_ru else "handler", stage=convo.stage)
+        if not prompt and reply_ru:
+            prompt = self.brain.load_prompt("handler", stage=convo.stage)
         if not prompt:
             prompt = f"""You are {self.config.persona.name}, {self.config.persona.role} at {self.config.persona.company}.
 Your tone is: {self.config.persona.tone}
 Product: {self.config.product.name} — {self.config.product.description}"""
 
         # Inject objection handling + sales methodology skills
-        if self.skills:
-            prompt += "\n\n" + self.skills
+        skills = self.skills
+        if reply_ru and language_of(self.config) != "ru":
+            skills = skills_for(self.brain, "handler", "ru")
+        if skills:
+            prompt += "\n\n" + skills
         # A startup's founder (YC, another accelerator, a raise they
         # announced) gets the founder playbook. An optional lookup never
         # stops a reply: startup_facts reads a failure as "not a startup".
@@ -1016,6 +1045,9 @@ Write a reply that:"""
 - Makes it easy for them to refer (one-line ask)
 - Under 50 words"""
 
+        if reply_ru:
+            prompt += ("\n\nПиши ответ по-русски, на «вы», если собеседник сам не перешёл на «ты». "
+                       "Тот же объём и те же правила.")
         prompt += "\n\nWrite ONLY the email body. No subject line, no greeting label, no signature block, no markdown."
 
         response = await self.brain.think(
@@ -1031,7 +1063,8 @@ Write a reply that:"""
             return ""
         response = response.strip()
         # Guard against the model returning meta-text instead of an email
-        if response.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,")):
+        if response.lower().startswith(("i can't", "i cannot", "as an ai", "sorry,",
+                                        "не могу", "как ии", "как искусственный интеллект", "извините,")):
             logger.warning("Handler: Model returned meta-text instead of an email. Discarding.")
             return ""
         polished = await humanize(

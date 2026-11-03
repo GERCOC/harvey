@@ -28,6 +28,7 @@ BANNED_PHRASES = (
 )
 
 MAX_SUBJECT_LEN = 90
+from harvey.ru_text import banned_phrase_ru  # noqa: E402
 MAX_BODY_WORDS = 220        # hard ceiling; sequences aim far lower
 MAX_LINKS = 1
 
@@ -225,6 +226,9 @@ def pre_send_check(
     # Banned phrases (spam triggers + AI tells)
     lowered = (subject + " " + body).lower()
     hits = [p for p in BANNED_PHRASES if p in lowered]
+    ru_hit = banned_phrase_ru(subject + " " + body)       # Russian wording; no-op on English
+    if ru_hit:
+        hits.append(ru_hit)
     if hits:
         reasons.append(f"banned phrases: {hits[:3]}")
 
@@ -403,9 +407,10 @@ def _shown(host: str, link: str, prefix: str) -> str:
 # them in an outgoing email means a reply quoted Harvey's playbook back.
 # These are written to be said to prospects, so echoing them is fine.
 _SAY_ALOUD_FILES = frozenset({"email_frameworks.md", "product_knowledge.md",
-                              "objection_handling.md", "README.md"})
+                              "objection_handling.md", "README.md",
+                              "email_frameworks_ru.md", "objection_handling_ru.md"})
 LEAK_RUN_WORDS = 12       # this many words in a row, copied, is a quote
-_WORD_RE = re.compile(r"[a-z0-9']+")
+_WORD_RE = re.compile(r"[a-zа-яё0-9']+")
 # Lines the playbooks quote as scripts to use ("Would Thursday at 2pm work
 # for a quick call?"): saying them is the point, so they aren't checked.
 _SCRIPT_LINE_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:>|[\"“'‘])")

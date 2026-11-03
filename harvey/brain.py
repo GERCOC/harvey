@@ -705,7 +705,7 @@ class Brain:
             logger.error(f"Could not read skill file {skill_file}: {e}")
             return ""
 
-    def load_skills_for_agent(self, agent_name: str) -> str:
+    def load_skills_for_agent(self, agent_name: str, language: str = "en") -> str:
         """Load all relevant skills for a specific sub-agent.
 
         Returns concatenated skill content that should be injected
@@ -724,6 +724,11 @@ class Brain:
         skill_names = skill_map.get(agent_name, [])
         if not skill_names:
             return ""
+        if language == "ru":
+            # A Russian version of a skill replaces the English one when it
+            # exists (email_frameworks_ru.md); the rest are read as they are.
+            skill_names = [f"{n}_ru" if (SKILLS_DIR / f"{n}_ru.md").is_file() else n
+                           for n in skill_names]
 
         sections = []
         for name in skill_names:

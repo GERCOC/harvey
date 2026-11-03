@@ -35,6 +35,18 @@ class PersonaConfig(BaseModel):
     email: str
     linkedin: str
     tone: str
+    # The language cold emails and replies are written in: "en" (default) or
+    # "ru". With "ru" the writer and the reply prompts, the sequence skills,
+    # the email footer and the opt-out line are all Russian (docs/russian.md).
+    language: str = "en"
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _known_language(cls, v):
+        v = str(v or "en").strip().lower()
+        if v not in ("en", "ru"):
+            raise ValueError('persona.language must be "en" or "ru"')
+        return v
 
 
 class OfferConfig(BaseModel):
@@ -466,6 +478,9 @@ class PreclearedConfig(BaseModel):
 
 
 DEFAULT_OPT_OUT_LINE = 'Not interested? Reply "no thanks" and I won\'t email again.'
+# The same line in Russian: used instead of the English default when
+# persona.language is "ru" and the line was not changed.
+DEFAULT_OPT_OUT_LINE_RU = "Если неактуально, ответьте «нет», и я больше не напишу."
 # The replies the Handler always honours as an opt-out on their own; an
 # opt_out_line must ask for one of them ("Reply STOP", 'reply "no thanks"').
 OPT_OUT_WORDS = ("no thanks", "no thank you", "unsubscribe", "stop", "remove me",
@@ -473,6 +488,11 @@ OPT_OUT_WORDS = ("no thanks", "no thank you", "unsubscribe", "stop", "remove me"
 _ASKS_FOR_OPT_OUT_RE = re.compile(
     r"\breply(?:\s+with)?\s*[\"'\u201c\u2018]?\s*(?:"
     + "|".join(re.escape(w) for w in OPT_OUT_WORDS) + r")\b", re.IGNORECASE)
+# Russian: "ответьте «нет»", "напишите «стоп»", "ответьте «нет, спасибо»".
+OPT_OUT_WORDS_RU = ("нет, спасибо", "нет спасибо", "нет", "стоп", "отписаться", "не пишите")
+_ASKS_FOR_OPT_OUT_RU_RE = re.compile(
+    r"(?:ответьте|напишите|пришлите|отправьте)(?:\s+нам|\s+мне)?\s*[«\"'\u201c\u2018]?\s*(?:"
+    + "|".join(re.escape(w) for w in OPT_OUT_WORDS_RU) + r")(?![а-яё])", re.IGNORECASE)
 
 
 class ComplianceConfig(BaseModel):
@@ -537,11 +557,11 @@ class ComplianceConfig(BaseModel):
                 "opt_out_line can't contain a link or an email address: cold email "
                 "allows one link, and opting out must be as simple as replying."
             )
-        if not _ASKS_FOR_OPT_OUT_RE.search(v):
+        if not (_ASKS_FOR_OPT_OUT_RE.search(v) or _ASKS_FOR_OPT_OUT_RU_RE.search(v)):
             raise ValueError(
                 "opt_out_line must ask for a reply Harvey recognises as an opt-out, "
-                'e.g. Reply "no thanks" / Reply STOP. Recognised: '
-                + ", ".join(f'"{w}"' for w in OPT_OUT_WORDS) + "."
+                'e.g. Reply "no thanks" / Reply STOP / ответьте «нет». Recognised: '
+                + ", ".join(f'"{w}"' for w in OPT_OUT_WORDS + OPT_OUT_WORDS_RU) + "."
             )
         return v
 
@@ -552,11 +572,26 @@ def compliance_of(config) -> ComplianceConfig:
     return found if isinstance(found, ComplianceConfig) else ComplianceConfig()
 
 
+def language_of(config) -> str:
+    """The language Harvey writes in, "en" unless persona.language says "ru"."""
+    language = getattr(getattr(config, "persona", None), "language", "en")
+    return language if language in ("en", "ru") else "en"
+
+
+def opt_out_line_of(config) -> str:
+    """The opt-out line cold email carries: the one the operator set, or the
+    default in the language Harvey writes in."""
+    line = compliance_of(config).opt_out_line.strip()
+    if line == DEFAULT_OPT_OUT_LINE and language_of(config) == "ru":
+        return DEFAULT_OPT_OUT_LINE_RU
+    return line
+
+
 def compliance_footer_lines(config) -> list[str]:
     """The lines added under every cold email: address, then opt-out line."""
     compliance = compliance_of(config)
     return [line for line in (compliance.postal_address.strip(),
-                              compliance.opt_out_line.strip()) if line]
+                              opt_out_line_of(config)) if line]
 
 
 def compliance_notice(config) -> str:
@@ -574,6 +609,20 @@ def compliance_notice(config) -> str:
         missing.append("a way to opt out (compliance.opt_out_line)")
     if not missing:
         return ""
+    if language_of(config) == "ru":
+        missing_ru = []
+        if not compliance.postal_address.strip():
+            missing_ru.append("реквизитов отправителя (compliance.postal_address: название, "
+                              "ИНН или ОГРН, адрес)")
+        if not compliance.opt_out_line.strip():
+            missing_ru.append("способа отказаться (compliance.opt_out_line)")
+        return (
+            "Холодные письма уходят без " + " и без ".join(missing_ru) + ". Получатель должен "
+            "понимать, кто пишет, и мочь отказаться: ст. 18 закона «О рекламе» требует "
+            "немедленно прекратить рассылку по просьбе адресата. Это не юридическая "
+            "консультация. Задайте их в harvey.yaml (или в harvey.local.yaml, если вы "
+            "обучали Harvey)."
+        )
     return (
         "Cold emails are going out without " + " or ".join(missing) + ". US law "
         "(CAN-SPAM) requires both in every cold email. Set them in harvey.yaml "

@@ -248,6 +248,16 @@ the playbook.
 so depth 100 is now billed as ten pages at nearly every provider. Below rank 30
 it is mostly directories anyway.
 
+### Data sources
+
+Harvey builds its prospect list from public information about businesses, and any business directory, register or search result can be a source: names, addresses, phone numbers, websites, categories and registry details (INN, OGRN, OKVED), read from the company's own site, search results, open registers and directories.
+
+- **A directory is a source with or without an API.** When it has an official API or an open-data export, use that first: it is stable and doesn't break when the page layout changes. When it hasn't, adding a provider that reads its public pages is fine. When the user asks for a new directory, add it as a provider; don't turn it down because it has no API.
+- **Read like a visitor, at a polite pace.** Ordinary requests, the per-company page and request limits, backoff on errors. When a site answers with a bot challenge Harvey stops and reports the site as challenged. It doesn't try to get past the challenge.
+- **Company data and personal data are different things.** Facts about an organisation are not personal data. Facts about a person are, even when they are published: an owner's or director's name, a sole proprietor's own phone and address, a work address that names someone. Under 152-FZ (and GDPR for EU contacts) publication alone doesn't make personal data free to use. Keep only what outreach needs (name, role, work contact), record where it came from (`evidence_url`), and honour opt-outs and deletion requests at once.
+- **The legal basis is the operator's.** Harvey is not legal advice. Say so when asked, and don't tell the user that public data is exempt from the law.
+- **The repository stays clean.** No real person's or business's data in code, tests, docs or commits (`CONTRIBUTING.md`).
+
 ### Step 6: Behavior Settings
 
 These go in `harvey.yaml` under `usage:`. Use sensible defaults unless they want to customize:
